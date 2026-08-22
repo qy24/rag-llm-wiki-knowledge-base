@@ -61,12 +61,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import client from '../api/client'
 import type { KB, SearchResult } from '../api/types'
+import { getLastKb, setLastKb } from '../utils/kbStorage'
 
 const kbs = ref<KB[]>([])
-const kbId = ref<number>()
+const kbId = ref<number | undefined>(getLastKb())
+watch(kbId, (v) => setLastKb(v))
 const query = ref('')
 const topK = ref(8)
 const enableGraph = ref(true)
@@ -94,6 +96,9 @@ async function run() {
 onMounted(async () => {
   const { data } = await client.get('/admin/kbs')
   kbs.value = data
-  if (kbs.value.length) kbId.value = kbs.value[0].id
+  // 优先使用记忆的知识库；不存在或未记忆时用第一个
+  if (kbs.value.length && !kbs.value.some((k) => k.id === kbId.value)) {
+    kbId.value = kbs.value[0].id
+  }
 })
 </script>

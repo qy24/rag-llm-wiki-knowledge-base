@@ -32,16 +32,20 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute } from 'vue-router'
 import client from '../api/client'
 import type { ChunkItem, DocumentItem, KB } from '../api/types'
+import { getLastKb, setLastKb } from '../utils/kbStorage'
 
 const route = useRoute()
 const kbs = ref<KB[]>([])
 const docs = ref<DocumentItem[]>([])
-const kbId = ref<number | undefined>(route.query.kb ? Number(route.query.kb) : undefined)
+const kbId = ref<number | undefined>(
+  route.query.kb ? Number(route.query.kb) : getLastKb(),
+)
+watch(kbId, (v) => setLastKb(v))
 const docId = ref<number | undefined>(route.query.doc ? Number(route.query.doc) : undefined)
 const chunks = ref<ChunkItem[]>([])
 
@@ -73,6 +77,9 @@ async function saveAll() {
 onMounted(async () => {
   const { data } = await client.get('/admin/kbs')
   kbs.value = data
+  if (kbs.value.length && !kbs.value.some((k) => k.id === kbId.value)) {
+    kbId.value = kbs.value[0].id
+  }
   await loadDocs()
 })
 </script>

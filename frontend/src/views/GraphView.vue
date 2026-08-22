@@ -147,15 +147,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import client from '../api/client'
 import type { ChunkItem, EntityItem, KB, RelationItem } from '../api/types'
+import { getLastKb, setLastKb } from '../utils/kbStorage'
 
 const route = useRoute()
 const kbs = ref<KB[]>([])
-const kbId = ref<number | undefined>(route.query.kb ? Number(route.query.kb) : undefined)
+const kbId = ref<number | undefined>(
+  route.query.kb ? Number(route.query.kb) : getLastKb(),
+)
+watch(kbId, (v) => setLastKb(v))
 const container = ref<HTMLElement>()
 const entities = ref<EntityItem[]>([])
 const relations = ref<RelationItem[]>([])
@@ -385,6 +389,9 @@ async function createRelation() {
 onMounted(async () => {
   const { data } = await client.get('/admin/kbs')
   kbs.value = data
+  if (kbs.value.length && !kbs.value.some((k) => k.id === kbId.value)) {
+    kbId.value = kbs.value[0].id
+  }
   await load()
 })
 

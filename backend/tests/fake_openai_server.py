@@ -59,7 +59,18 @@ def chat_completions(body: dict):
     user_content = messages[-1].get("content", "") if messages else ""
     json_mode = body.get("response_format", {}).get("type") == "json_object"
     if json_mode:
-        content = __import__("json").dumps(EXTRACT_JSON, ensure_ascii=False)
+        # 模拟真实 LLM：只返回与输入文本相关的实体（查询实体提取/图谱抽取都只提相关项）
+        related = [
+            e for e in EXTRACT_JSON["entities"]
+            if e["name"] in user_content
+        ]
+        relations = [
+            r for r in EXTRACT_JSON["relations"]
+            if r["source"] in [e["name"] for e in related]
+            and r["target"] in [e["name"] for e in related]
+        ]
+        content = __import__("json").dumps(
+            {"entities": related, "relations": relations}, ensure_ascii=False)
     else:
         content = "模拟云端回答：" + user_content[:40]
     return {

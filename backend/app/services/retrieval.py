@@ -123,6 +123,28 @@ def search_knowledge(
                 merged_rels[r["id"]] = r
             entities = list(merged.values())
             relations = list(merged_rels.values())
+            # 4) 多条件交集：查询点名多个实体时（如"加拿大遥控器的所有产品"），
+            #    每个返回实体必须与【每一个】点名实体都相连，否则排除
+            #    （J01 只连加拿大不连遥控器 → 被排除）
+            if name_seeds:
+                name_seed_unique = list(dict.fromkeys(name_seeds))
+                reach_sets: list[set[str]] = []
+                for n in name_seed_unique:
+                    # LLM 提到的名字在图谱中不存在（已合并/删除/幻觉）→ 不参与交集约束，避免误清空结果
+                    if n not in ids_by_name:
+                        continue
+                    ents, _ = gstore.subgraph(
+                        allowed, [n], min(max(graph_depth, 1) + 1, 3), None)
+                    ids = {e["id"] for e in ents}
+                    ids.update(ids_by_name.get(n, []))
+                    reach_sets.append(ids)
+                if reach_sets:
+                    common = set.intersection(*reach_sets)
+                    entities = [e for e in entities if e["id"] in common]
+                    kept_ids = {e["id"] for e in entities}
+                    relations = [r for r in relations
+                                 if r["source_entity_id"] in kept_ids
+                                 and r["target_entity_id"] in kept_ids]
             graph = {"entities": entities, "relations": relations}
             for e in entities:
                 if e.get("source_chunk_id"):
