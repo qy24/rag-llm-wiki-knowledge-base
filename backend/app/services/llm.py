@@ -2,26 +2,11 @@
 from __future__ import annotations
 
 import json
-import re
 from abc import ABC, abstractmethod
 
 import httpx
 
 from ..config import Settings
-
-_EXCLUDE_PATTERNS = [
-    re.compile(r"(?:除了|除去|剔除|排除|不要)\s*([^的，。,、和及与所有都以外]+)"),
-    re.compile(r"([^的，。,、和及与所有都]+)\s*以外"),
-]
-
-
-def rule_exclude_terms(query: str) -> list[str]:
-    """中文规则兜底：从'除了X/不要X/X以外'等表达中提取排除词（不依赖 LLM）。"""
-    for pat in _EXCLUDE_PATTERNS:
-        m = pat.search(query)
-        if m and m.group(1).strip():
-            return [m.group(1).strip()]
-    return []
 
 GRAPH_EXTRACT_SYSTEM = (
     "你是知识图谱抽取引擎。从给定的文本中抽取实体与关系。"

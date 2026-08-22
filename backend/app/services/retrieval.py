@@ -91,7 +91,7 @@ def search_knowledge(
                 s for s in rel_seeds
                 if set(ids_by_name.get(s, [])) & nbr_ids
             ]
-        # 2b) 查询意图解析（LLM + 中文规则）：识别点名实体、排除等复合语义（"除了遥控器"→排除）
+        # 2b) 查询意图解析（LLM）：识别点名实体、排除等复合语义（"除了遥控器"→排除）
         llm = llm_svc.resolve_llm(settings)
         intent: dict = {}
         if llm.configured():
@@ -99,13 +99,11 @@ def search_knowledge(
                 intent = llm_svc.parse_query_intent(llm, query)
             except Exception:
                 intent = {}
-        # 清洗意图：只保留与查询/图谱相关的项（防止小模型幻觉或英文干扰）
+        # 清洗意图：只保留与查询/图谱相关的项（防止模型幻觉或英文干扰）
         intent_anchors = [a for a in intent.get("anchors", [])
                           if a and (a in query or a in ids_by_name)]
         intent_reltypes = [rt for rt in intent.get("relation_types", []) if rt and rt in query]
-        intent_excl = [t for t in intent.get("exclude", []) if t and t in query]
-        intent_excl += llm_svc.rule_exclude_terms(query)  # 中文规则兜底，不依赖 LLM
-        exclude_terms = list(dict.fromkeys(t for t in intent_excl if t))
+        exclude_terms = [t for t in intent.get("exclude", []) if t and t in query]
         if exclude_terms:
             # 排除对象不应作为正向锚点（"除了遥控器"的"遥控器"不是要查的，而是要剔除的）
             def _excl_hit(text: str) -> bool:
