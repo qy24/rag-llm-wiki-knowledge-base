@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
+    # LLM 接口风格：openai（兼容接口）| ollama_native（本地 Ollama 原生，qwen3 系需 think=false）
+    llm_api_style: str = "openai"
 
     # 向量库：local | qdrant
     vector_backend: str = "local"

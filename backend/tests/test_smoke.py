@@ -13,6 +13,9 @@ os.environ["VECTOR_BACKEND"] = "local"
 os.environ["GRAPH_BACKEND"] = "local"
 os.environ["DATABASE_URL"] = "sqlite:///./test_smoke.db"
 os.environ["DATA_DIR"] = "./test_data"
+# 测试固定 OpenAI 兼容风格 + 空 LLM Key（避免读取真实 .env 的本地 Ollama 配置）
+os.environ["LLM_API_STYLE"] = "openai"
+os.environ["LLM_API_KEY"] = ""
 
 for _p in ("test_smoke.db", "test_data"):
     if os.path.isdir(_p):

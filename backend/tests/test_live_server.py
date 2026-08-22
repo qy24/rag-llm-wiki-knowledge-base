@@ -33,6 +33,8 @@ os.environ["DATA_DIR"] = "./test_live_data"
 # 测试进程直连本机服务，禁用任何代理（CI/沙箱环境常见干扰源）
 os.environ["NO_PROXY"] = "*"
 os.environ["no_proxy"] = "*"
+# fake 服务器是 OpenAI 兼容接口，固定风格避免读取真实 .env 的 ollama_native
+os.environ["LLM_API_STYLE"] = "openai"
 
 for _p in ("test_live.db", "test_live_data"):
     if os.path.isdir(_p):

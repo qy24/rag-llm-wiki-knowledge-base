@@ -91,13 +91,34 @@ def search_knowledge(
                 s for s in rel_seeds
                 if set(ids_by_name.get(s, [])) & nbr_ids
             ]
-        # 2b) LLM 提取查询实体（有配置时）
+        # 2b) 查询意图解析（LLM + 中文规则）：识别点名实体、排除等复合语义（"除了遥控器"→排除）
         llm = llm_svc.resolve_llm(settings)
+        intent: dict = {}
         if llm.configured():
             try:
-                name_seeds.extend(llm_svc.query_entities(llm, query))
+                intent = llm_svc.parse_query_intent(llm, query)
             except Exception:
-                pass
+                intent = {}
+        # 清洗意图：只保留与查询/图谱相关的项（防止小模型幻觉或英文干扰）
+        intent_anchors = [a for a in intent.get("anchors", [])
+                          if a and (a in query or a in ids_by_name)]
+        intent_reltypes = [rt for rt in intent.get("relation_types", []) if rt and rt in query]
+        intent_excl = [t for t in intent.get("exclude", []) if t and t in query]
+        intent_excl += llm_svc.rule_exclude_terms(query)  # 中文规则兜底，不依赖 LLM
+        exclude_terms = list(dict.fromkeys(t for t in intent_excl if t))
+        if exclude_terms:
+            # 排除对象不应作为正向锚点（"除了遥控器"的"遥控器"不是要查的，而是要剔除的）
+            def _excl_hit(text: str) -> bool:
+                return any(t in text or text in t for t in exclude_terms)
+            name_seeds = [n for n in name_seeds if not _excl_hit(n)]
+            type_seeds = [s for s in type_seeds if not _excl_hit(s)]
+            rel_seeds = [s for s in rel_seeds if not _excl_hit(s)]
+        for a in intent_anchors:
+            if a and a not in name_seeds:
+                name_seeds.append(a)
+        for rt in intent_reltypes:
+            if rt and rt not in matched_rel_types:
+                matched_rel_types.append(rt)
         seed_names = list(dict.fromkeys(n for n in (name_seeds + type_seeds + rel_seeds) if n))
         if seed_names:
             # ===== 检索精度规则（持久生效，数据再多也按真实关系收紧）=====
@@ -145,6 +166,22 @@ def search_knowledge(
                     relations = [r for r in relations
                                  if r["source_entity_id"] in kept_ids
                                  and r["target_entity_id"] in kept_ids]
+            # 5) 排除语义：查询明确排除的对象（"除了遥控器"）→ 剔除该对象及其 1 跳相连的实体
+            if exclude_terms:
+                excl_names = [n for n in ids_by_name
+                              if any(t in n for t in exclude_terms)]
+                excl_ids: set[str] = {i for n in excl_names for i in ids_by_name[n]}
+                for e in entities:
+                    if any(t in str(e.get("type", "")) for t in exclude_terms):
+                        excl_ids.add(e["id"])
+                if excl_names:
+                    nb, _ = gstore.subgraph(allowed, excl_names, 1, None)
+                    excl_ids.update(e["id"] for e in nb)
+                entities = [e for e in entities if e["id"] not in excl_ids]
+                kept_ids = {e["id"] for e in entities}
+                relations = [r for r in relations
+                             if r["source_entity_id"] in kept_ids
+                             and r["target_entity_id"] in kept_ids]
             graph = {"entities": entities, "relations": relations}
             for e in entities:
                 if e.get("source_chunk_id"):
