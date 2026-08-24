@@ -28,6 +28,9 @@ class Embedder(ABC):
 class OpenAICompatEmbedder(Embedder):
     def __init__(self, settings: Settings):
         self.base_url = settings.embedding_base_url.rstrip("/")
+        # OpenAI 兼容网关一般以 /v1 提供接口；只填根域名时自动补全（与 LLM 客户端一致）
+        if not self.base_url.endswith("/v1"):
+            self.base_url += "/v1"
         self.api_key = settings.embedding_api_key
         self.model = settings.embedding_model
         self.dim = settings.embedding_dim

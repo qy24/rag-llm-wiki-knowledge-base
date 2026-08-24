@@ -94,6 +94,8 @@ class ApiKey(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 密钥级回答提示词（空=用全局默认/内置）：分配"这套提示词给这个密钥"
+    prompt_template: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

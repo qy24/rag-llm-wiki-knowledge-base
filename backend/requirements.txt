@@ -18,3 +18,5 @@ neo4j>=5.20
 mcp>=1.0,<2
 psycopg2-binary>=2.9
 pytest>=8.0
+# 视觉 RAG：发往云端前压缩用户附图/内部图片（venv 已装 12.3.0）
+Pillow>=10.0

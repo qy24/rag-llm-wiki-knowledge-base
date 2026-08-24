@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from sqlalchemy.orm import Session
 
 from ..config import Settings
@@ -12,6 +14,79 @@ from ..models import Chunk, KnowledgeBase
 from ..stores import get_graph_store, get_vector_store
 from .embedding import get_embedder
 from . import llm as llm_svc
+
+# "X的所有/全部数据" 类枚举查询：沿任意关系类型扩展（配合排除语义返回完整数据）
+_ENUMERATE_MARKERS = ("所有", "全部", "一切")
+# LLM 意图解析不可用时的中文排除词规则兜底（如"除了X/排除X/不要X"）
+_EXCLUDE_MARKERS = ("除了", "除外", "排除", "不包括", "剔除", "去掉", "不要", "除去", "不含")
+
+
+def _is_enumerate_query(query: str) -> bool:
+    return any(m in query for m in _ENUMERATE_MARKERS)
+
+
+def _rule_exclude_terms(query: str) -> list[str]:
+    """轻量中文规则兜底：从查询中提取"除了X"等表达中的排除对象（LLM 失败/未配置时保底）。"""
+    terms: list[str] = []
+    for m in re.finditer(
+        r"(?:%s)\s*([^，。？?,.、\s]{1,12})" % "|".join(_EXCLUDE_MARKERS), query
+    ):
+        t = m.group(1).strip()
+        if t and t not in terms:
+            terms.append(t)
+    return terms
+
+
+def _graph_levels(entities: list[dict], relations: list[dict],
+                  seed_ids: set[str]) -> dict[str, int]:
+    """从种子（锚点）实体出发 BFS，返回 {实体id: 层级}；种子=0，不连通实体取大层级。
+
+    用于结果排序：锚点实体（如"斑笔科技"）排最上，逐级向下，同级再按名称。
+    """
+    adj: dict[str, set[str]] = {}
+    for r in relations:
+        s = str(r.get("source_entity_id", ""))
+        t = str(r.get("target_entity_id", ""))
+        adj.setdefault(s, set()).add(t)
+        adj.setdefault(t, set()).add(s)
+    levels: dict[str, int] = {}
+    frontier: list[str] = []
+    for n in seed_ids:
+        if n and n not in levels:
+            levels[n] = 0
+            frontier.append(n)
+    level = 0
+    while frontier:
+        level += 1
+        nxt: list[str] = []
+        for node in frontier:
+            for nb in adj.get(node, ()):
+                if nb not in levels:
+                    levels[nb] = level
+                    nxt.append(nb)
+        frontier = nxt
+    return levels
+
+
+def format_graph_context(graph: dict, max_items: int = 50) -> str:
+    """把图谱命中的实体/关系格式化为可读文本，供 RAG 回答上下文使用。
+
+    kb2 这类纯图谱库（无文档文本块）也能据此回答"有哪些数据"类问题。
+    """
+    entities = graph.get("entities", [])
+    relations = graph.get("relations", [])
+    if not entities and not relations:
+        return ""
+    lines = ["【知识图谱命中】"]
+    eid2name = {e.get("id"): e.get("name", "") for e in entities}
+    for e in entities[:max_items]:
+        mark = "（已确认）" if e.get("verified") else ""
+        lines.append(f"- 实体：{e.get('name', '')}[{e.get('type', '')}]{mark}")
+    for r in relations[:max_items]:
+        src = eid2name.get(r.get("source_entity_id")) or r.get("source_entity_id", "")
+        tgt = eid2name.get(r.get("target_entity_id")) or r.get("target_entity_id", "")
+        lines.append(f"- 关系：{src} -{r.get('relation_type', '')}-> {tgt}")
+    return "\n".join(lines)
 
 
 def search_knowledge(
@@ -26,6 +101,7 @@ def search_knowledge(
     top_k = max(1, min(top_k, 50))
     graph_depth = max(0, min(graph_depth, 3))
     allowed = list(dict.fromkeys(allowed_kb_ids))
+    enumerate_query = _is_enumerate_query(query)
 
     embedder = get_embedder(settings)
     vstore = get_vector_store(settings)
@@ -97,13 +173,19 @@ def search_knowledge(
         if llm.configured():
             try:
                 intent = llm_svc.parse_query_intent(llm, query)
-            except Exception:
+            except Exception as e:
+                # 失败可见性：云端模型调用失败（网络/余额/超时）时输出到服务日志，便于排查
+                print(f"[LLM] parse_query_intent 失败，排除语义走规则兜底："
+                      f"{type(e).__name__}: {e}", flush=True)
                 intent = {}
         # 清洗意图：只保留与查询/图谱相关的项（防止模型幻觉或英文干扰）
         intent_anchors = [a for a in intent.get("anchors", [])
                           if a and (a in query or a in ids_by_name)]
         intent_reltypes = [rt for rt in intent.get("relation_types", []) if rt and rt in query]
         exclude_terms = [t for t in intent.get("exclude", []) if t and t in query]
+        if not exclude_terms:
+            # LLM 未给出排除（未配置/调用失败/漏识别）→ 中文规则兜底："除了X/排除X/不要X"
+            exclude_terms = [t for t in _rule_exclude_terms(query) if t]
         if exclude_terms:
             # 排除对象不应作为正向锚点（"除了遥控器"的"遥控器"不是要查的，而是要剔除的）
             def _excl_hit(text: str) -> bool:
@@ -125,9 +207,18 @@ def search_knowledge(
             # 2) 类型/关系类型召回的实体只是"叶子"，纳入结果但不继续扩散邻居
             #    （避免"美国站的ASIN"把加拿大站ASIN带进来、"加拿大的品牌"把美国带进来）
             # 3) 纯"列举"查询（仅类型/关系类型命中，如"站点有哪些""产品"）→ 不扩展，只返回命中实体与其之间的关系
+            # 4) "X的所有/全部数据"枚举查询（如"斑笔科技除了美国站的所有数据"）→
+            #    沿任意关系类型扩展（至多 3 跳），再配合排除语义剔除排除对象及其 1 跳邻居
             if name_seeds:
-                depth_eff = graph_depth if matched_rel_types else 0
-                rel_filter = list(dict.fromkeys(matched_rel_types)) or None
+                if matched_rel_types:
+                    depth_eff = graph_depth
+                    rel_filter = list(dict.fromkeys(matched_rel_types)) or None
+                elif enumerate_query:
+                    depth_eff = 3
+                    rel_filter = None
+                else:
+                    depth_eff = 0
+                    rel_filter = None
                 exp_entities, exp_rels = gstore.subgraph(
                     allowed, list(dict.fromkeys(name_seeds)), depth_eff, rel_filter)
             else:
@@ -148,12 +239,12 @@ def search_knowledge(
             if name_seeds:
                 name_seed_unique = list(dict.fromkeys(name_seeds))
                 reach_sets: list[set[str]] = []
+                reach_depth = 3 if enumerate_query else min(max(graph_depth, 1) + 1, 3)
                 for n in name_seed_unique:
                     # LLM 提到的名字在图谱中不存在（已合并/删除/幻觉）→ 不参与交集约束，避免误清空结果
                     if n not in ids_by_name:
                         continue
-                    ents, _ = gstore.subgraph(
-                        allowed, [n], min(max(graph_depth, 1) + 1, 3), None)
+                    ents, _ = gstore.subgraph(allowed, [n], reach_depth, None)
                     ids = {e["id"] for e in ents}
                     ids.update(ids_by_name.get(n, []))
                     reach_sets.append(ids)
@@ -166,8 +257,9 @@ def search_knowledge(
                                  and r["target_entity_id"] in kept_ids]
             # 5) 排除语义：查询明确排除的对象（"除了遥控器"）→ 剔除该对象及其 1 跳相连的实体
             if exclude_terms:
+                # 双向包含匹配：排除词含实体名（"美国站"→实体"美国"）或实体名含排除词（"遥控器图片"）
                 excl_names = [n for n in ids_by_name
-                              if any(t in n for t in exclude_terms)]
+                              if any(t in n or n in t for t in exclude_terms)]
                 excl_ids: set[str] = {i for n in excl_names for i in ids_by_name[n]}
                 for e in entities:
                     if any(t in str(e.get("type", "")) for t in exclude_terms):
@@ -175,12 +267,31 @@ def search_knowledge(
                 if excl_names:
                     nb, _ = gstore.subgraph(allowed, excl_names, 1, None)
                     excl_ids.update(e["id"] for e in nb)
+                # 锚点（点名实体）即使与排除对象相连也要保留：
+                # "斑笔科技除了美国站" → 斑笔科技不能被当作"美国站的1跳邻居"误删
+                keep_ids: set[str] = {i for n in name_seeds for i in ids_by_name.get(n, [])}
+                excl_ids -= keep_ids
                 entities = [e for e in entities if e["id"] not in excl_ids]
                 kept_ids = {e["id"] for e in entities}
                 relations = [r for r in relations
                              if r["source_entity_id"] in kept_ids
                              and r["target_entity_id"] in kept_ids]
-            graph = {"entities": entities, "relations": relations}
+            # 6) 结果排序：按图谱层级（锚点实体最上，逐级向下），同级按名称——
+            #    "斑笔科技除了美国站"→ 斑笔科技(0) > 站点(1) > ASIN/品牌(2) > 产品类型(3)
+            _eid2name = {e["id"]: str(e.get("name", "")) for e in entities}
+            _seed_ids = {i for n in name_seeds for i in ids_by_name.get(n, [])}
+            _levels = _graph_levels(entities, relations, _seed_ids)
+            _FAR = 999
+            graph = {
+                "entities": sorted(entities, key=lambda e: (
+                    _levels.get(str(e["id"]), _FAR), str(e.get("name", "")))),
+                "relations": sorted(relations, key=lambda r: (
+                    _levels.get(str(r.get("source_entity_id")), _FAR),
+                    _eid2name.get(str(r.get("source_entity_id")), ""),
+                    str(r.get("relation_type", "")),
+                    _eid2name.get(str(r.get("target_entity_id")), ""),
+                )),
+            }
             for e in entities:
                 if e.get("source_chunk_id"):
                     graph_chunk_ids.add(e["source_chunk_id"])

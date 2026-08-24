@@ -34,6 +34,13 @@ QUERY_INTENT_SYSTEM = (
     "没有的字段用空数组[]，不要用英文翻译中文术语。"
 )
 
+IMAGE_DESCRIBE_SYSTEM = (
+    "你是图像理解引擎，服务于企业知识库检索。"
+    "请用简洁的中文要点描述图片内容，重点提取可用于检索的事实："
+    "图中的物体、品牌/文字、型号、数量、场景、人物动作等。"
+    "不超过 80 字，不要臆测图中没有的信息。"
+)
+
 
 def _extract_json(text: str) -> dict:
     """鲁棒解析 LLM 输出中的 JSON（兼容 markdown 代码块/前后缀文字）。"""
@@ -53,17 +60,28 @@ def _extract_json(text: str) -> dict:
 
 
 class LLMClient(ABC):
+    # 是否支持图片输入（视觉模型）。OpenAI 兼容端点按视觉模型配置视为支持；
+    # 本机 Ollama 的 qwen3.5 无视觉能力，默认不支持。
+    supports_vision: bool = False
+
     @abstractmethod
     def chat(self, messages: list[dict], json_mode: bool = False,
-             temperature: float = 0.2, max_tokens: int = 2048) -> str: ...
+             temperature: float = 0.2, max_tokens: int = 2048,
+             timeout: int | None = None) -> str: ...
 
     def configured(self) -> bool:
         return True
 
 
 class OpenAICompatLLM(LLMClient):
+    supports_vision = True
+
     def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 180):
         self.base_url = base_url.rstrip("/")
+        # 大多数 OpenAI 兼容网关（OpenAI/aihubmix 等）以 /v1 提供接口；
+        # 用户只填根域名（如 https://aihubmix.com）时自动补全，避免 401/404
+        if not self.base_url.endswith("/v1"):
+            self.base_url += "/v1"
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
@@ -72,18 +90,31 @@ class OpenAICompatLLM(LLMClient):
         return bool(self.api_key and self.model)
 
     def chat(self, messages: list[dict], json_mode: bool = False,
-             temperature: float = 0.2, max_tokens: int = 2048) -> str:
+             temperature: float = 0.2, max_tokens: int = 2048,
+             timeout: int | None = None) -> str:
         body: dict = {"model": self.model, "messages": messages,
                       "temperature": temperature, "max_tokens": max_tokens}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
-        resp = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json=body, timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        effective_timeout = timeout or self.timeout
+        # 轻量重试：云端限流（429）或 5xx 时退避重试，最多 3 次（间隔 1s/2s/3s）
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            resp = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=body, timeout=effective_timeout,
+            )
+            if resp.status_code not in (429, 500, 502, 503, 504):
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+            last_exc = httpx.HTTPStatusError(
+                f"Server error '{resp.status_code}'", request=resp.request, response=resp)
+            if attempt < 2:
+                import time
+                time.sleep(attempt + 1)
+        assert last_exc is not None
+        raise last_exc
 
 
 class DummyLLM(LLMClient):
@@ -96,7 +127,8 @@ class DummyLLM(LLMClient):
         return True
 
     def chat(self, messages: list[dict], json_mode: bool = False,
-             temperature: float = 0.2, max_tokens: int = 2048) -> str:
+             temperature: float = 0.2, max_tokens: int = 2048,
+             timeout: int | None = None) -> str:
         if json_mode:
             return '{"entities":[],"relations":[]}'
         return "（离线模式回答：未配置云端大模型）"
@@ -117,7 +149,8 @@ class OllamaNativeLLM(LLMClient):
         return bool(self.model)
 
     def chat(self, messages: list[dict], json_mode: bool = False,
-             temperature: float = 0.2, max_tokens: int = 2048) -> str:
+             temperature: float = 0.2, max_tokens: int = 2048,
+             timeout: int | None = None) -> str:
         body = {
             "model": self.model,
             "messages": messages,
@@ -125,7 +158,8 @@ class OllamaNativeLLM(LLMClient):
             "think": False,  # 关闭思考链，直接输出
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
-        resp = httpx.post(f"{self.base_url}/api/chat", json=body, timeout=self.timeout)
+        resp = httpx.post(f"{self.base_url}/api/chat", json=body,
+                          timeout=timeout or self.timeout)
         resp.raise_for_status()
         return resp.json()["message"]["content"]
 
@@ -150,6 +184,7 @@ def extract_graph(llm: LLMClient, texts: list[str]) -> dict:
         [{"role": "system", "content": GRAPH_EXTRACT_SYSTEM},
          {"role": "user", "content": prompt}],
         json_mode=True, max_tokens=4096,
+        timeout=600,  # 思考模型批量抽取慢，放宽读超时
     )
     try:
         return json.loads(content)
@@ -161,7 +196,7 @@ def query_entities(llm: LLMClient, query: str) -> list[str]:
     content = llm.chat(
         [{"role": "system", "content": QUERY_ENTITY_SYSTEM},
          {"role": "user", "content": query}],
-        json_mode=True, max_tokens=512,
+        json_mode=True, max_tokens=1024,
     )
     try:
         raw = json.loads(content).get("entities", [])
@@ -180,7 +215,7 @@ def parse_query_intent(llm: LLMClient, query: str) -> dict:
     content = llm.chat(
         [{"role": "system", "content": QUERY_INTENT_SYSTEM},
          {"role": "user", "content": query}],
-        json_mode=True, max_tokens=512,
+        json_mode=True, max_tokens=2048,  # 思考模型（deepseek 系）需为思考链留足 token
     )
     data = _extract_json(content)
     return {
@@ -189,3 +224,21 @@ def parse_query_intent(llm: LLMClient, query: str) -> dict:
         "entity_types": [str(x) for x in data.get("entity_types", []) if x],
         "exclude": [str(x) for x in data.get("exclude", []) if x],
     }
+
+
+def describe_images(llm: LLMClient, image_parts: list[dict], text_hint: str = "") -> str:
+    """视觉 RAG 第一步：让视觉模型理解用户附图，产出用于检索的文字描述。
+
+    image_parts 为 OpenAI 视觉格式的 image_url 片段（dict 列表）。
+    模型不支持视觉或调用失败时抛异常，由调用方回退纯文本检索。
+    """
+    user_content: list[dict] = [
+        {"type": "text", "text": text_hint or "请描述这张图片的内容"}
+    ]
+    user_content.extend(image_parts)
+    content = llm.chat(
+        [{"role": "system", "content": IMAGE_DESCRIBE_SYSTEM},
+         {"role": "user", "content": user_content}],
+        temperature=0.1, max_tokens=1024,
+    )
+    return content.strip()

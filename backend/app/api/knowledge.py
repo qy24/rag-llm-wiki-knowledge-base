@@ -16,8 +16,9 @@ from ..config import get_settings
 from ..database import get_db
 from ..deps import KeyScope, get_key_scope
 from ..models import AuditLog, KnowledgeBase
-from ..schemas import ChatIn, GraphQueryIn, SearchIn
+from ..schemas import ChatIn, GraphQueryIn, SearchIn, content_has_images, content_text
 from ..services import llm as llm_svc
+from ..services.rag import LLMError, rag_chat
 from ..services.retrieval import graph_query, search_knowledge
 
 router = APIRouter()
@@ -73,46 +74,38 @@ def graph_search(body: GraphQueryIn, request: Request,
 def chat_completions(body: ChatIn, request: Request,
                      scope: KeyScope = Depends(get_key_scope),
                      db: Session = Depends(get_db)):
-    """OpenAI 兼容聚合端点：检索该密钥授权范围内的知识 → 组装上下文 → 调云端模型生成。"""
+    """OpenAI 兼容聚合端点：检索该密钥授权范围内的知识 → 组装上下文 → 调云端模型生成。
+
+    末条消息携带图片（OpenAI 视觉 content 格式）时走视觉 RAG：
+    图片理解 → 检索内部数据 + 内部相关图片 → 视觉模型生成回答。
+    """
     if not scope.allowed_kb_ids:
         raise HTTPException(403, "该密钥未绑定任何知识库")
-    user_msg = body.messages[-1].content
+    last_msg = body.messages[-1]
     kb_ids = scope.allowed_kb_ids
-    kbs = db.query(KnowledgeBase).filter(KnowledgeBase.id.in_(kb_ids)).all()
-    llm = llm_svc.resolve_llm(settings, kbs[0] if kbs else None)
-    if not llm.configured():
-        raise HTTPException(503, "未配置云端大模型（请在系统设置中配置 OpenAI 兼容端点）")
-
-    result = search_knowledge(
-        db, settings, user_msg, kb_ids, top_k=body.top_k,
-        graph_depth=body.graph_depth, enable_graph=True,
-    )
-    context_parts = []
-    for i, c in enumerate(result["chunks"], 1):
-        doc_name = c["metadata"].get("doc_name") or ""
-        page = c["metadata"].get("page", "")
-        ref = f"{doc_name}" + (f" 第{page}页" if page else "")
-        context_parts.append(f"[{i}] {c['content']}\n来源: {ref}")
-    context = "\n\n".join(context_parts) if context_parts else "（未检索到相关内容）"
-
-    system = (
-        "你是企业知识助手。请严格基于【参考知识】回答，不要编造。"
-        "回答时在相关句末标注来源编号如 [1][2]。"
-        "如果参考知识不足以回答，请明确说明。\n\n【参考知识】\n" + context
-    )
-    messages = [{"role": "system", "content": system}] + [
-        {"role": m.role, "content": m.content} for m in body.messages
-    ]
-    answer = llm.chat(messages, temperature=body.temperature)
-
-    _log(scope, "chat.completions", user_msg,
-         {"hits": len(result["chunks"]), "answer_len": len(answer)}, request)
+    try:
+        result = rag_chat(
+            db, settings, kb_ids, body.messages,
+            top_k=body.top_k, graph_depth=body.graph_depth,
+            temperature=body.temperature,
+            prompt=scope.api_key.prompt_template or None,
+        )
+    except LLMError as e:
+        raise HTTPException(e.status_code, str(e))
+    answer = result["answer"]
+    _log(scope,
+         "chat.completions.vision" if content_has_images(last_msg.content) else "chat.completions",
+         content_text(last_msg.content)[:500],
+         {"hits": len(result["sources"]),
+          "internal_images": len(result["internal_images"]),
+          "answer_len": len(answer)}, request)
     return {
         "id": "chatcmpl-kb-local",
         "object": "chat.completion",
-        "model": body.model or llm.model if isinstance(llm, llm_svc.OpenAICompatLLM) else "local",
+        "model": body.model or result["model"],
         "choices": [{"index": 0, "message": {"role": "assistant", "content": answer},
                      "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "sources": result["chunks"],
+        "sources": result["sources"],
+        "internal_images": result["internal_images"],
     }

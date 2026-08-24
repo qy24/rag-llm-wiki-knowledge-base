@@ -1,9 +1,25 @@
 """应用配置：从环境变量 / .env 读取。"""
 import os
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# httpx 默认不读取 Windows 系统代理（WinINET 注册表），只认环境变量。
+# 很多机器（如本机 127.0.0.1:10258 的本地代理客户端）直连海外 HTTPS 被网络策略阻断，
+# 导致云端大模型调用超时失败、排除语义等静默失效。
+# 注意顺序：必须先读系统代理再设 NO_PROXY——getproxies() 只要发现环境里有
+# no_proxy/HTTP_PROXY 等变量就跳过注册表，只返回环境变量内容。
+try:
+    _sys_proxies = urllib.request.getproxies()
+except Exception:
+    _sys_proxies = {}
+for _scheme in ("http", "https"):
+    _url = _sys_proxies.get(_scheme)
+    _env = _scheme.upper() + "_PROXY"
+    if _url and not os.environ.get(_env):
+        os.environ[_env] = _url
 
 # 本地回环地址（本机 Ollama 等本地嵌入/模型服务）不走代理；
 # 云端地址（api.openai.com 等）仍遵循系统/环境代理配置。
@@ -46,6 +62,9 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     # LLM 接口风格：openai（兼容接口）| ollama_native（本地 Ollama 原生，qwen3 系需 think=false）
     llm_api_style: str = "openai"
+
+    # 回答生成提示词（全局默认；空=用代码内置默认）。密钥可配置自己的提示词覆盖（ApiKey.prompt_template）
+    prompt_answer_system: str = ""
 
     # 向量库：local | qdrant
     vector_backend: str = "local"

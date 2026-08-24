@@ -44,6 +44,17 @@ def init_db() -> None:
     from . import models  # noqa: F401  确保模型注册
 
     Base.metadata.create_all(bind=engine)
+    _migrate()
+
+def _migrate() -> None:
+    """轻量迁移：为已有库补充新增列（SQLite ALTER TABLE ADD COLUMN 幂等）。"""
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    if insp.has_table("api_keys"):
+        cols = {c["name"] for c in insp.get_columns("api_keys")}
+        if "prompt_template" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE api_keys ADD COLUMN prompt_template TEXT DEFAULT ''"))
 
 
 def get_db():

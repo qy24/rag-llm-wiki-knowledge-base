@@ -86,6 +86,7 @@ class KeyIn(BaseModel):
     key_type: str = "search"  # search | ingest | full
     allowed_kb_ids: list[int] = Field(default_factory=list)
     expires_at: datetime | None = None
+    prompt_template: str = ""  # 密钥级回答提示词（空=用全局/内置）
 
 
 class KeyOut(BaseModel):
@@ -97,6 +98,7 @@ class KeyOut(BaseModel):
     revoked: bool
     last_used_at: datetime | None
     created_at: datetime
+    prompt_template: str = ""
     key: str | None = None  # 创建时返回明文一次
 
     model_config = {"from_attributes": True}
@@ -115,9 +117,17 @@ class GraphQueryIn(BaseModel):
     depth: int = Field(default=2, ge=1, le=5)
 
 
+class ChatContentPart(BaseModel):
+    """OpenAI 视觉消息内容片段：text 或 image_url（data:image/... 或 http(s) 地址）。"""
+    type: str
+    text: str | None = None
+    image_url: dict[str, Any] | None = None
+
+
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    # 纯文本（原有调用不受影响）或 OpenAI 视觉格式的内容片段列表
+    content: str | list[ChatContentPart]
 
 
 class ChatIn(BaseModel):
@@ -126,6 +136,38 @@ class ChatIn(BaseModel):
     temperature: float = 0.2
     top_k: int = Field(default=8, ge=1, le=50)
     graph_depth: int = Field(default=1, ge=0, le=3)
+
+
+class AdminChatIn(BaseModel):
+    """admin 对话测试台请求：选 API 密钥，检索范围=密钥绑定 KB（不越权），提示词=密钥配置。"""
+    api_key_id: int
+    messages: list[ChatMessage] = Field(min_length=1)
+    temperature: float = 0.2
+    top_k: int = Field(default=8, ge=1, le=50)
+    graph_depth: int = Field(default=1, ge=0, le=3)
+
+
+def content_has_images(content: str | list[ChatContentPart]) -> bool:
+    """消息是否携带图片（视觉分支判定）。"""
+    return isinstance(content, list) and any(
+        isinstance(p, ChatContentPart) and p.type == "image_url" for p in content)
+
+
+def content_text(content: str | list[ChatContentPart]) -> str:
+    """提取消息的纯文本部分（用于检索/审计日志）。"""
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        p.text for p in content
+        if isinstance(p, ChatContentPart) and p.type == "text" and p.text
+    ).strip()
+
+
+def content_to_parts(content: str | list[ChatContentPart]) -> list[dict]:
+    """把消息内容转成可发给 OpenAI 兼容接口的 content 片段（dict 列表）。"""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [p.model_dump(exclude_none=True) for p in content]
 
 
 class EntityUpdateIn(BaseModel):
@@ -168,6 +210,7 @@ class SettingsIn(BaseModel):
     llm_api_key: str | None = None
     llm_model: str | None = None
     graph_extraction_enabled: bool | None = None
+    prompt_answer_system: str | None = None
 
 
 class SettingsOut(BaseModel):
@@ -177,6 +220,7 @@ class SettingsOut(BaseModel):
     llm_base_url: str
     llm_model: str
     graph_extraction_enabled: bool
+    prompt_answer_system: str = ""
     # 密钥脱敏展示
     embedding_api_key_masked: str = ""
     llm_api_key_masked: str = ""
