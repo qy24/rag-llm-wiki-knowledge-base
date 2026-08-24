@@ -12,12 +12,17 @@ A **self-hosted, visual knowledge base system** that runs on a single Windows ma
 ## What it does
 
 - **Document pipeline**: PDF / DOCX / Markdown / HTML / TXT / PPTX / XLSX → text blocks → chunks (with page/heading metadata) → embeddings → knowledge graph (entities & relations extracted by LLM)
-- **Hybrid retrieval**: vector similarity + knowledge graph traversal, fused and ranked, with source citations
+- **Hybrid retrieval**: vector similarity + knowledge graph traversal, fused and ranked, with source citations; graph retrieval is tightened by real relations (type/relation seeds only return entities connected to named entities, no cross-topic leakage)
+- **Exclusion semantics**: queries like "all data except X" are parsed by the LLM intent layer; excluded objects and their 1-hop neighbors are removed from results; "all/全部 data" enumeration queries expand along relations before exclusion
 - **Multi-tenant permission isolation (core)**: each client holds an independent API key bound to its own knowledge bases; retrieval is **enforced server-side** by `kb_id` filters (vector store payload + graph Cypher) — clients cannot exceed their scope
 - **Three integration interfaces**:
   - `POST /api/v1/knowledge/search` — hybrid retrieval REST API
   - `POST /api/v1/chat/completions` — OpenAI-compatible aggregate endpoint (local retrieval + cloud LLM generation)
   - **MCP Server** at `POST /mcp` — works with Claude Desktop / Cursor / Dify / custom agents
+- **Vision RAG**: the chat endpoint accepts OpenAI vision-format content (text + `image_url` data URL / http(s)); the system understands the image, retrieves internal data and related internal images, and answers with a vision-capable model; images are compressed locally (Pillow, max 1024px) before upload
+- **Configurable answer prompts**: three levels — per-key prompt (assigned in the key management page) > global default (settings page) > built-in (natural customer-service tone); the system appends the retrieved context automatically
+- **Chat test console**: pick an API key in the web UI to simulate real remote calls (scope = the key's bound KBs, no privilege escalation); multi-turn chat with expandable retrieval evidence and the effective prompt
+- **Layered graph layout**: one-click "auto layout" — top-level nodes (in-degree 0) on top, layers downward, same-level sorted by name, Barycenter heuristic reduces edge crossings; node sizes uniform, spacing auto-adaptive; drag positions are remembered
 - **Human-in-the-loop graph curation**: review, edit, delete and **merge entities** in a G6 canvas; mark them `verified` to boost retrieval ranking
 - **Images in the knowledge graph**: uploading an image auto-creates an "image entity" and can auto-link it to same-named entities via a `配图` (illustration) relation; click the image entity to view the original image
 - **Entity detail panel**: click an entity to **add multiple relations in a row** (direction/type/target), list/edit/delete all its relations, and **remember node positions** (auto-saved on drag)
