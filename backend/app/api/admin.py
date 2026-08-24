@@ -14,6 +14,7 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..models import ApiKey, AppSetting, Chunk, Document, KnowledgeBase, Task, User
 from ..schemas import (
+    AdminChatIn,
     ChunkOut,
     ChunkUpdateIn,
     DocumentOut,
@@ -29,9 +30,11 @@ from ..schemas import (
     SearchIn,
     SettingsIn,
     SettingsOut,
+    content_text,
 )
 from ..security import generate_api_key, hash_api_key
 from ..services import parsing
+from ..services.rag import LLMError, rag_chat
 from ..stores import get_graph_store, get_vector_store
 from ..workers import start_worker
 
@@ -342,7 +345,7 @@ def create_key(body: KeyIn, db: Session = Depends(get_db),
     key = ApiKey(
         user_id=user.id, name=body.name, key_type=body.key_type,
         key_hash=hash_api_key(plain), allowed_kb_ids=body.allowed_kb_ids,
-        expires_at=body.expires_at,
+        expires_at=body.expires_at, prompt_template=body.prompt_template,
     )
     db.add(key)
     db.commit()
@@ -362,6 +365,7 @@ def update_key(key_id: int, body: KeyIn, db: Session = Depends(get_db),
     key.name = body.name
     key.allowed_kb_ids = body.allowed_kb_ids
     key.expires_at = body.expires_at
+    key.prompt_template = body.prompt_template
     db.commit()
     db.refresh(key)
     _audit(db, user, "update_key", summary={"key_id": key_id}, request=request)
@@ -439,6 +443,44 @@ def dashboard(db: Session = Depends(get_db)):
     }
 
 
+@router.post("/chat")
+def admin_chat(body: AdminChatIn, db: Session = Depends(get_db),
+               user: User = Depends(get_current_user), request: Request = None):
+    """对话测试台：选 API 密钥 → 检索范围=密钥绑定 KB（不越权）、提示词=密钥配置。"""
+    key = db.get(ApiKey, body.api_key_id)
+    if key is None:
+        raise HTTPException(404, "密钥不存在")
+    if key.revoked:
+        raise HTTPException(400, "该密钥已吊销")
+    if key.expires_at is not None and key.expires_at < datetime.now():
+        raise HTTPException(400, "该密钥已过期")
+    if not key.allowed_kb_ids:
+        raise HTTPException(400, "该密钥未绑定任何知识库，无法检索")
+    try:
+        result = rag_chat(
+            db, settings, list(key.allowed_kb_ids), body.messages,
+            top_k=body.top_k, graph_depth=body.graph_depth,
+            temperature=body.temperature,
+            prompt=key.prompt_template or None,
+        )
+    except LLMError as e:
+        raise HTTPException(e.status_code, str(e))
+    _audit(db, user, "chat.test",
+           content_text(body.messages[-1].content)[:500],
+           {"api_key_id": key.id, "kb_ids": list(key.allowed_kb_ids),
+            "hits": len(result["sources"]), "answer_len": len(result["answer"])},
+           api_key_id=key.id, request=request)
+    result["api_key_id"] = key.id
+    result["scope_kb_ids"] = list(key.allowed_kb_ids)
+    if key.prompt_template.strip():
+        result["prompt_source"] = "key"
+    elif settings.prompt_answer_system.strip():
+        result["prompt_source"] = "global"
+    else:
+        result["prompt_source"] = "builtin"
+    return result
+
+
 @router.get("/settings", response_model=SettingsOut)
 def get_settings_api(db: Session = Depends(get_db)):
     mask = lambda s: (s[:4] + "****" + s[-4:]) if len(s) > 10 else "****"
@@ -449,6 +491,7 @@ def get_settings_api(db: Session = Depends(get_db)):
         llm_base_url=settings.llm_base_url,
         llm_model=settings.llm_model,
         graph_extraction_enabled=settings.graph_extraction_enabled,
+        prompt_answer_system=settings.prompt_answer_system,
         embedding_api_key_masked=mask(settings.embedding_api_key) if settings.embedding_api_key else "",
         llm_api_key_masked=mask(settings.llm_api_key) if settings.llm_api_key else "",
     )
@@ -468,6 +511,7 @@ def update_settings_api(body: SettingsIn, db: Session = Depends(get_db),
     row.value = {k: getattr(settings, k) for k in (
         "embedding_mode", "embedding_base_url", "embedding_api_key", "embedding_model",
         "llm_base_url", "llm_api_key", "llm_model", "graph_extraction_enabled",
+        "prompt_answer_system",
     )}
     db.commit()
     _audit(db, user, "update_settings", request=request)

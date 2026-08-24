@@ -206,7 +206,11 @@ class LocalGraphStore(GraphStore):
 
     def list_relations(self, kb_id: int, limit: int, offset: int) -> tuple[list[Relation], int]:
         rows = [r for r in self._relations.values() if r["kb_id"] == kb_id]
-        rows.sort(key=lambda r: r.get("created_at", ""))
+        # 按 (起点名, 关系类型, 终点名) 排序，保证展示顺序稳定
+        name_of = {eid: str(e.get("name", "")) for eid, e in self._entities.items()}
+        rows.sort(key=lambda r: (name_of.get(r.get("source_entity_id"), ""),
+                                 str(r.get("relation_type", "")),
+                                 name_of.get(r.get("target_entity_id"), "")))
         return rows[offset:offset + limit], len(rows)
 
     def update_entity(self, entity_id: str, fields: dict) -> None:
