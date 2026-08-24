@@ -7,6 +7,8 @@
       <el-button type="primary" :disabled="!kbId" @click="load">加载图谱</el-button>
       <el-button type="success" :disabled="!kbId" @click="addEntityDialog = true">新增实体</el-button>
       <el-button type="warning" :disabled="!kbId" @click="addRelationDialog = true">新增关系</el-button>
+      <el-button type="info" :disabled="!kbId" @click="autoLayout">🔄 自动布局</el-button>
+      <span style="color:#909399;font-size:12px;margin-left:4px">自动布局：按层级排列（大节点在上），减少交叉，自动保存</span>
     </div>
 
     <el-row :gutter="12">
@@ -179,6 +181,142 @@ const relDirection = ref('out')
 
 let graph: any = null
 
+/**
+ * 分层布局（有向）：入度 0 的节点（顶级，如店铺/大类）排最上，BFS 逐层向下；
+ * 同层按名称（中文按拼音）排序 + Barycenter 迭代减交叉；节点宽度按最长标签自适应防遮挡。
+ */
+function layeredPositions(
+  nodeList: { id: string; label: string }[],
+  edgeList: { source: string; target: string }[],
+  w: number, h: number,
+): Map<string, { x: number; y: number }> {
+  const idSet = new Set(nodeList.map((n) => n.id))
+  const labelOf = new Map(nodeList.map((n) => [n.id, n.label] as const))
+  const out: Record<string, string[]> = {}
+  const inDeg: Record<string, number> = {}
+  nodeList.forEach((n) => { out[n.id] = []; inDeg[n.id] = 0 })
+  edgeList.forEach((e) => {
+    if (!idSet.has(e.source) || !idSet.has(e.target)) return
+    out[e.source].push(e.target)
+    inDeg[e.target]++
+  })
+
+  // 根 = 入度 0 的节点集合（无入边者如"斑笔科技"在最上层）
+  let roots = nodeList.filter((n) => inDeg[n.id] === 0).map((n) => n.id)
+  if (roots.length === 0) {
+    // 全部有入边（存在环）：退化为度最大的节点为根
+    const deg: Record<string, number> = {}
+    edgeList.forEach((e) => {
+      if (idSet.has(e.source) && idSet.has(e.target)) {
+        deg[e.source] = (deg[e.source] || 0) + 1
+        deg[e.target] = (deg[e.target] || 0) + 1
+      }
+    })
+    let mx = -1
+    nodeList.forEach((n) => { if ((deg[n.id] || 0) > mx) { mx = deg[n.id]; roots = [n.id] } })
+  }
+
+  // BFS 分层：level = 到最近根的最短距离
+  const level = new Map<string, number>()
+  let frontier = [...roots]
+  frontier.forEach((id) => level.set(id, 0))
+  let lv = 0
+  while (frontier.length) {
+    lv++
+    const next: string[] = []
+    frontier.forEach((id) => {
+      out[id].forEach((t) => { if (!level.has(t)) { level.set(t, lv); next.push(t) } })
+    })
+    frontier = next
+  }
+  nodeList.forEach((n) => { if (!level.has(n.id)) level.set(n.id, Math.max(lv, 1)) })
+
+  // 同层分组，先按名称（中文拼音）排序
+  const byLevel = new Map<number, string[]>()
+  nodeList.forEach((n) => {
+    const l = level.get(n.id)!
+    if (!byLevel.has(l)) byLevel.set(l, [])
+    byLevel.get(l)!.push(n.id)
+  })
+  const levels = [...byLevel.keys()].sort((a, b) => a - b)
+  levels.forEach((l) => {
+    byLevel.get(l)!.sort((a, b) => (labelOf.get(a) || '').localeCompare(labelOf.get(b) || '', 'zh'))
+  })
+
+  // Barycenter 减交叉：每层按"邻居在各自层的平均序号"排序，迭代 5 次
+  const indexIn = new Map<number, Map<string, number>>()
+  levels.forEach((l) => {
+    const m = new Map<string, number>()
+    byLevel.get(l)!.forEach((id, i) => m.set(id, i))
+    indexIn.set(l, m)
+  })
+  for (let iter = 0; iter < 5; iter++) {
+    levels.forEach((l) => {
+      const ids = byLevel.get(l)!
+      const center = (id: string) => {
+        const neigh = new Set<string>()
+        edgeList.forEach((e) => {
+          if (e.source === id && idSet.has(e.target)) neigh.add(e.target)
+          if (e.target === id && idSet.has(e.source)) neigh.add(e.source)
+        })
+        let sum = 0
+        let cnt = 0
+        neigh.forEach((nid) => {
+          const nl = level.get(nid)!
+          const idx = indexIn.get(nl)?.get(nid)
+          if (nl !== l && idx !== undefined) { sum += idx; cnt++ }
+        })
+        return cnt ? sum / cnt : ids.indexOf(id)
+      }
+      ids.sort((a, b) => center(a) - center(b))
+      const m = new Map<string, number>()
+      ids.forEach((id, i) => m.set(id, i))
+      indexIn.set(l, m)
+    })
+  }
+
+  // 坐标分配：统一间距（下限 110px 防重叠），层级间距固定 170px（上下拉开）
+  const maxLabel = Math.max(...nodeList.map((n) => (labelOf.get(n.id) || '').length), 2)
+  const nodeW = Math.min(Math.max(maxLabel * 13 + 40, 110), 190)
+  const layerH = 170
+  const pos = new Map<string, { x: number; y: number }>()
+  levels.forEach((l) => {
+    const ids = byLevel.get(l)!
+    const rowW = ids.length * nodeW
+    const x0 = rowW > w - 20 ? 10 : (w - rowW) / 2
+    ids.forEach((id, i) => {
+      pos.set(id, { x: x0 + nodeW / 2 + i * nodeW, y: 60 + l * layerH })
+    })
+  })
+  return pos
+}
+
+async function autoLayout() {
+  if (!container.value || !graph) return
+  const pos = layeredPositions(
+    entities.value.map((e) => ({ id: e.id, label: e.name })),
+    relations.value.map((r) => ({ source: r.source_entity_id, target: r.target_entity_id })),
+    container.value.clientWidth, container.value.clientHeight,
+  )
+  // 应用到画布
+  graph.getNodes().forEach((n: any) => {
+    const m = n.getModel()
+    const p = pos.get(m.id)
+    if (p) graph.updateItem(n, { x: p.x, y: p.y })
+  })
+  // 保存坐标（覆盖旧乱坐标，刷新后仍整齐）
+  await Promise.all(
+    entities.value.map((e) => {
+      const p = pos.get(e.id)
+      if (!p) return Promise.resolve(null)
+      return client.patch(`/admin/entities/${e.id}`, {
+        properties: { ...(e.properties || {}), x: Math.round(p.x), y: Math.round(p.y) },
+      }).catch(() => null)
+    }),
+  )
+  ElMessage.success('已按层级自动布局并保存')
+}
+
 // 选中实体已有的全部关系（出 + 入）
 const selectedRelations = computed(() => {
   if (!selected.value) return []
@@ -257,19 +395,30 @@ function renderGraph() {
   }
   const w = container.value.clientWidth
   const h = container.value.clientHeight
-  const nodes = entities.value.map((e, i) => {
+  // 无任何保存坐标时（新库/未拖拽过）默认按层级布局，避免散乱
+  const hasAnySaved = entities.value.some((e) => typeof (e.properties as any)?.x === 'number')
+  const layoutPos = hasAnySaved
+    ? null
+    : layeredPositions(
+        entities.value.map((e) => ({ id: e.id, label: e.name })),
+        relations.value.map((r) => ({ source: r.source_entity_id, target: r.target_entity_id })),
+        w, h,
+      )
+  const nodes = entities.value.map((e) => {
     const saved = (e.properties as any) || {}
     const pos = posMap.get(e.id) || saved
-    const x = typeof pos.x === 'number' ? pos.x : 80 + ((i * 97) % Math.max(w - 160, 100))
-    const y = typeof pos.y === 'number' ? pos.y : 80 + ((i * 53) % Math.max(h - 160, 100))
+    const lp = layoutPos?.get(e.id)
+    const x = typeof pos.x === 'number' ? pos.x : lp ? lp.x : 80 + ((e.id.charCodeAt(0) * 97) % Math.max(w - 160, 100))
+    const y = typeof pos.y === 'number' ? pos.y : lp ? lp.y : 80 + ((e.id.charCodeAt(1) * 53) % Math.max(h - 160, 100))
     return {
       id: e.id,
       label: e.name,
       type: e.type,
       x,
       y,
+      size: 34, // 节点统一大小，名称显示在节点下方（不溢出、整齐）
+      labelCfg: { position: 'bottom', offset: 10, style: { fontSize: 12 } },
       style: { fill: e.verified ? '#67c23a' : '#409eff', stroke: '#333' },
-      size: 26,
     }
   })
   const edges = relations.value.map((r) => ({

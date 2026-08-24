@@ -50,6 +50,7 @@ const menus = [
   { path: '/chunks', title: '切分块管理' },
   { path: '/graph', title: '知识图谱' },
   { path: '/search', title: '检索调试台' },
+  { path: '/chat', title: '对话测试台' },
   { path: '/keys', title: '密钥管理' },
   { path: '/audit', title: '审计日志' },
   { path: '/settings', title: '系统设置' },

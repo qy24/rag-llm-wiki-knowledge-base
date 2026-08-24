@@ -32,6 +32,14 @@
         <el-form-item label="图谱抽取">
           <el-switch v-model="form.graph_extraction_enabled" />
         </el-form-item>
+        <el-divider />
+        <el-form-item label="回答提示词（全局默认）">
+          <el-input v-model="form.prompt_answer_system" type="textarea" :rows="5"
+                    placeholder="留空=用内置默认（真人客服口吻，不出现来源编号）。密钥可在「密钥管理」中配置自己的提示词覆盖本设置" />
+          <div style="color:#909399;font-size:12px;line-height:1.6;margin-top:4px">
+            提示词层级：密钥自定义 &gt; 全局默认 &gt; 内置默认。系统会自动在其后拼接【参考知识】检索内容。
+          </div>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="save">保存设置</el-button>
           <span style="color: #909399; font-size: 12px; margin-left: 12px">
@@ -51,7 +59,7 @@ import client from '../api/client'
 const form = reactive({
   embedding_mode: 'openai', embedding_base_url: '', embedding_model: '',
   embedding_api_key: '', llm_base_url: '', llm_model: '', llm_api_key: '',
-  graph_extraction_enabled: true,
+  graph_extraction_enabled: true, prompt_answer_system: '',
 })
 const masked = ref<any>({})
 
@@ -64,6 +72,7 @@ async function load() {
   form.llm_base_url = data.llm_base_url
   form.llm_model = data.llm_model
   form.graph_extraction_enabled = data.graph_extraction_enabled
+  form.prompt_answer_system = data.prompt_answer_system || ''
   form.embedding_api_key = ''
   form.llm_api_key = ''
 }

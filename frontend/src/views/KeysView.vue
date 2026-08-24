@@ -15,7 +15,7 @@
           <el-tag size="small">{{ row.key_type }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="绑定知识库" min-width="200">
+      <el-table-column label="绑定知识库" min-width="180">
         <template #default="{ row }">
           <el-tag
             v-for="kb in row.allowed_kb_ids"
@@ -28,6 +28,14 @@
           <span v-if="row.allowed_kb_ids.length === 0" style="color: #f56c6c; font-size: 12px">未绑定（无法检索）</span>
         </template>
       </el-table-column>
+      <el-table-column label="提示词" min-width="140">
+        <template #default="{ row }">
+          <el-tooltip v-if="row.prompt_template" :content="row.prompt_template" placement="top" :show-after="300">
+            <el-tag size="small" type="warning">自定义</el-tag>
+          </el-tooltip>
+          <span v-else style="color: #c0c4cc; font-size: 12px">使用默认</span>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" width="90">
         <template #default="{ row }">
           <el-tag :type="row.revoked ? 'danger' : 'success'" size="small">
@@ -35,17 +43,18 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="last_used_at" label="最近使用" width="170">
+      <el-table-column prop="last_used_at" label="最近使用" width="160">
         <template #default="{ row }">{{ row.last_used_at || '—' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="140">
+      <el-table-column label="操作" width="150">
         <template #default="{ row }">
+          <el-button v-if="!row.revoked" size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
           <el-button v-if="!row.revoked" size="small" type="danger" link @click="revoke(row)">吊销</el-button>
         </template>
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="dialog" title="创建密钥" width="480px">
+    <el-dialog v-model="dialog" title="创建密钥" width="560px">
       <el-form label-width="100px">
         <el-form-item label="名称" required><el-input v-model="form.name" placeholder="如：电脑1" /></el-form-item>
         <el-form-item label="类型">
@@ -59,10 +68,39 @@
             <el-option v-for="k in kbs" :key="k.id" :label="k.name" :value="k.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="提示词">
+          <el-input v-model="form.prompt_template" type="textarea" :rows="4"
+                    placeholder="（可选）分配给该密钥的回答提示词，如客服口吻/品牌风格；留空=用全局默认或内置" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
         <el-button type="primary" @click="create">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="editDialog" title="编辑密钥" width="560px">
+      <el-form label-width="100px">
+        <el-form-item label="名称" required><el-input v-model="form.name" /></el-form-item>
+        <el-form-item label="类型">
+          <el-select v-model="form.key_type" :disabled="true">
+            <el-option label="search（只读检索）" value="search" />
+            <el-option label="full（检索+管理）" value="full" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="绑定知识库">
+          <el-select v-model="form.allowed_kb_ids" multiple style="width: 100%">
+            <el-option v-for="k in kbs" :key="k.id" :label="k.name" :value="k.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="提示词">
+          <el-input v-model="form.prompt_template" type="textarea" :rows="5"
+                    placeholder="（可选）分配给该密钥的回答提示词；留空=用全局默认或内置" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editDialog = false">取消</el-button>
+        <el-button type="primary" @click="saveEdit">保存</el-button>
       </template>
     </el-dialog>
 
@@ -84,9 +122,11 @@ import type { ApiKeyItem, KB } from '../api/types'
 const keys = ref<ApiKeyItem[]>([])
 const kbs = ref<KB[]>([])
 const dialog = ref(false)
+const editDialog = ref(false)
+const editId = ref<number | null>(null)
 const plainDialog = ref(false)
 const plainKey = ref('')
-const form = reactive({ name: '', key_type: 'search', allowed_kb_ids: [] as number[] })
+const form = reactive({ name: '', key_type: 'search', allowed_kb_ids: [] as number[], prompt_template: '' })
 
 // 知识库 ID -> 名称（按"知识库管理"中的名称展示；查不到时兜底显示 #ID）
 function kbName(id: number): string {
@@ -107,6 +147,24 @@ async function create() {
   dialog.value = false
   form.name = ''
   form.allowed_kb_ids = []
+  form.prompt_template = ''
+  load()
+}
+
+function openEdit(row: ApiKeyItem) {
+  editId.value = row.id
+  form.name = row.name
+  form.key_type = row.key_type
+  form.allowed_kb_ids = [...(row.allowed_kb_ids || [])]
+  form.prompt_template = row.prompt_template || ''
+  editDialog.value = true
+}
+
+async function saveEdit() {
+  if (!editId.value || !form.name) return
+  await client.patch(`/admin/keys/${editId.value}`, form)
+  ElMessage.success('已保存')
+  editDialog.value = false
   load()
 }
 

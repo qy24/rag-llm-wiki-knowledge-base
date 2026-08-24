@@ -70,6 +70,7 @@ export interface ApiKeyItem {
   revoked: boolean
   last_used_at: string | null
   created_at: string
+  prompt_template?: string
   key?: string
 }
 
