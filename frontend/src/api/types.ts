@@ -12,6 +12,7 @@ export interface KB {
   chunk_overlap: number
   graph_extraction_enabled: boolean
   llm_base_url: string
+  layout_type?: 'auto' | 'layered' | 'force'
   llm_model: string
   created_at: string
 }
@@ -105,7 +106,9 @@ export interface AuditItem {
   id: number
   action: string
   query: string
-  result_summary: Record<string, unknown>
+  result_summary: Record<string, any>
   ip: string
+  rating?: string
+  note?: string
   created_at: string | null
 }

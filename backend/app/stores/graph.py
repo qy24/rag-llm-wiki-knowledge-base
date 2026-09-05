@@ -66,6 +66,14 @@ class GraphStore(ABC):
     @abstractmethod
     def delete_by_kb(self, kb_id: int) -> None: ...
 
+    def snapshot_kb(self, kb_id: int) -> dict:
+        """导出某知识库全部实体/关系（重解析失败保护用）。"""
+        raise NotImplementedError
+
+    def restore_kb(self, kb_id: int, snapshot: dict) -> None:
+        """清空后恢复某知识库的实体/关系（重解析失败保护用）。"""
+        raise NotImplementedError
+
     @abstractmethod
     def count(self) -> tuple[int, int]: ...
 
@@ -287,6 +295,45 @@ class LocalGraphStore(GraphStore):
         with self._lock:
             self._entities = {eid: e for eid, e in self._entities.items() if e["kb_id"] != kb_id}
             self._relations = {rid: r for rid, r in self._relations.items() if r["kb_id"] != kb_id}
+        self._save()
+
+    def snapshot_kb(self, kb_id: int) -> dict:
+        """导出该知识库实体/关系（含 verified/properties），供重解析失败恢复。"""
+        with self._lock:
+            ents = [dict(e) for e in self._entities.values() if e["kb_id"] == kb_id]
+            rels = [dict(r) for r in self._relations.values() if r["kb_id"] == kb_id]
+        return {"entities": ents, "relations": rels}
+
+    def restore_kb(self, kb_id: int, snapshot: dict) -> None:
+        """清空该知识库后按快照重建实体/关系（保留 verified/properties/来源）。"""
+        self.delete_by_kb(kb_id)
+        ents = snapshot.get("entities", [])
+        rels = snapshot.get("relations", [])
+        with self._lock:
+            for e in ents:
+                eid = e.get("id") or uuid.uuid4().hex
+                self._entities[eid] = {
+                    "id": eid, "kb_id": kb_id, "name": e.get("name", ""),
+                    "type": e.get("type", "术语"),
+                    "properties": dict(e.get("properties") or {}),
+                    "source_doc_id": e.get("source_doc_id"),
+                    "source_chunk_id": e.get("source_chunk_id"),
+                    "verified": bool(e.get("verified")),
+                    "created_at": e.get("created_at") or self._now(),
+                }
+            for r in rels:
+                rid = r.get("id") or uuid.uuid4().hex
+                self._relations[rid] = {
+                    "id": rid, "kb_id": kb_id,
+                    "source_entity_id": r.get("source_entity_id"),
+                    "target_entity_id": r.get("target_entity_id"),
+                    "relation_type": r.get("relation_type", ""),
+                    "properties": dict(r.get("properties") or {}),
+                    "source_doc_id": r.get("source_doc_id"),
+                    "source_chunk_id": r.get("source_chunk_id"),
+                    "verified": bool(r.get("verified")),
+                    "created_at": r.get("created_at") or self._now(),
+                }
         self._save()
 
     def count(self) -> tuple[int, int]:

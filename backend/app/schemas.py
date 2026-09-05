@@ -34,6 +34,20 @@ class KBIn(BaseModel):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    layout_type: str = "auto"  # auto | layered | force
+
+
+class KBUpdateIn(BaseModel):
+    """部分更新（如图谱页只切布局）——全部字段可选。"""
+    name: str | None = None
+    description: str | None = None
+    chunk_size: int | None = Field(default=None, ge=64, le=4096)
+    chunk_overlap: int | None = Field(default=None, ge=0, le=1024)
+    graph_extraction_enabled: bool | None = None
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
+    llm_model: str | None = None
+    layout_type: str | None = None
 
 
 class KBOut(BaseModel):
@@ -45,6 +59,7 @@ class KBOut(BaseModel):
     graph_extraction_enabled: bool
     llm_base_url: str
     llm_model: str
+    layout_type: str = "auto"
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -136,6 +151,25 @@ class ChatIn(BaseModel):
     temperature: float = 0.2
     top_k: int = Field(default=8, ge=1, le=50)
     graph_depth: int = Field(default=1, ge=0, le=3)
+    # 多客户会话记忆：传入客户唯一 ID（邮箱/订单号）时，系统自动恢复该客户上次对话
+    # 上下文并接着处理；不同客户（或不同密钥）之间完全隔离；不传则保持无状态（兼容旧调用）
+    session_id: str | None = Field(default=None, max_length=128)
+    # 对话上下文（可选）：一段多方往来文本（客户/客服/平台邮件等，无角色、按时间顺序）。
+    # 传入后系统通读理解来龙去脉，针对 messages 中最新一条（未回复的问题）给出连贯衔接的回复；
+    # 不传则按普通单问题正常回答。
+    context: str | list[str] | None = None
+    # 咨询阶段（二选一）：
+    # - is_after_sale 布尔：True=售后（默认，订单已存在直接给解决方案）；False=售前咨询
+    # - consult_type 字符串：presale/aftersale/售前/售后（显式传时优先于 is_after_sale）
+    is_after_sale: bool = True
+    consult_type: str | None = None
+
+
+def resolve_consult_type(consult_type: str | None, is_after_sale: bool) -> str:
+    """归一咨询类型：显式字符串优先；否则按布尔（True=售后，False=售前）。"""
+    if consult_type in ("presale", "aftersale", "售前", "售后"):
+        return "aftersale" if consult_type in ("aftersale", "售后") else "presale"
+    return "aftersale" if is_after_sale else "presale"
 
 
 class AdminChatIn(BaseModel):
@@ -145,6 +179,9 @@ class AdminChatIn(BaseModel):
     temperature: float = 0.2
     top_k: int = Field(default=8, ge=1, le=50)
     graph_depth: int = Field(default=1, ge=0, le=3)
+    context: str | list[str] | None = None
+    is_after_sale: bool = True
+    consult_type: str | None = None
 
 
 def content_has_images(content: str | list[ChatContentPart]) -> bool:
@@ -199,6 +236,12 @@ class RelationCreateIn(BaseModel):
 class EntityMergeIn(BaseModel):
     source_id: str
     target_id: str
+
+
+class AuditUpdateIn(BaseModel):
+    """审计打标（进化学习）：rating=good/bad/''，note 备注。"""
+    rating: str | None = None
+    note: str | None = None
 
 
 class SettingsIn(BaseModel):

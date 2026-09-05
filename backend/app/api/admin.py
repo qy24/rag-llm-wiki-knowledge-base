@@ -11,10 +11,11 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, require_admin
 from ..models import ApiKey, AppSetting, Chunk, Document, KnowledgeBase, Task, User
 from ..schemas import (
     AdminChatIn,
+    AuditUpdateIn,
     ChunkOut,
     ChunkUpdateIn,
     DocumentOut,
@@ -23,6 +24,7 @@ from ..schemas import (
     EntityUpdateIn,
     KBIn,
     KBOut,
+    KBUpdateIn,
     KeyIn,
     KeyOut,
     RelationCreateIn,
@@ -30,6 +32,7 @@ from ..schemas import (
     SearchIn,
     SettingsIn,
     SettingsOut,
+    resolve_consult_type,
     content_text,
 )
 from ..security import generate_api_key, hash_api_key
@@ -44,6 +47,11 @@ settings = get_settings()
 
 def _audit(db: Session, user: User, action: str, query: str = "", summary: dict | None = None,
            api_key_id: int | None = None, request: Request | None = None):
+    # 只保留"对话类"审计（含客户问题与回复，供进化学习参考）；
+    # 管理操作（密钥/知识库/文档/设置/图谱编辑等）不再写审计——
+    # 它们没有 query/answer，会刷出大量空白记录（用户反馈"空余消息"）
+    if action != "chat.test":
+        return
     from ..models import AuditLog
     db.add(AuditLog(
         api_key_id=api_key_id, user_id=user.id, action=action, query=query,
@@ -59,7 +67,7 @@ def list_kbs(db: Session = Depends(get_db)):
 
 
 @router.post("/kbs", response_model=KBOut)
-def create_kb(body: KBIn, user: User = Depends(get_current_user),
+def create_kb(body: KBIn, user: User = Depends(require_admin),
               db: Session = Depends(get_db), request: Request = None):
     kb = KnowledgeBase(owner_user_id=user.id, **body.model_dump())
     db.add(kb)
@@ -70,13 +78,15 @@ def create_kb(body: KBIn, user: User = Depends(get_current_user),
 
 
 @router.patch("/kbs/{kb_id}", response_model=KBOut)
-def update_kb(kb_id: int, body: KBIn, db: Session = Depends(get_db),
-              user: User = Depends(get_current_user), request: Request = None):
+def update_kb(kb_id: int, body: KBUpdateIn, db: Session = Depends(get_db),
+              user: User = Depends(require_admin), request: Request = None):
     kb = db.get(KnowledgeBase, kb_id)
     if kb is None:
         raise HTTPException(404, "知识库不存在")
-    for k, v in body.model_dump().items():
-        setattr(kb, k, v)
+    # 只更新调用方传入的字段（如图谱页仅传 layout_type 切换布局）
+    for k, v in body.model_dump(exclude_unset=True).items():
+        if v is not None:
+            setattr(kb, k, v)
     db.commit()
     db.refresh(kb)
     _audit(db, user, "update_kb", summary={"kb_id": kb_id}, request=request)
@@ -85,7 +95,7 @@ def update_kb(kb_id: int, body: KBIn, db: Session = Depends(get_db),
 
 @router.delete("/kbs/{kb_id}")
 def delete_kb(kb_id: int, db: Session = Depends(get_db),
-              user: User = Depends(get_current_user), request: Request = None):
+              user: User = Depends(require_admin), request: Request = None):
     kb = db.get(KnowledgeBase, kb_id)
     if kb is None:
         raise HTTPException(404, "知识库不存在")
@@ -103,7 +113,7 @@ def delete_kb(kb_id: int, db: Session = Depends(get_db),
 @router.post("/kbs/{kb_id}/documents", response_model=DocumentOut)
 async def upload_document(kb_id: int, file: UploadFile = File(...),
                           db: Session = Depends(get_db),
-                          user: User = Depends(get_current_user),
+                          user: User = Depends(require_admin),
                           request: Request = None):
     if db.get(KnowledgeBase, kb_id) is None:
         raise HTTPException(404, "知识库不存在")
@@ -159,7 +169,7 @@ def get_document_file(doc_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/documents/{doc_id}")
 def delete_document(doc_id: int, db: Session = Depends(get_db),
-                    user: User = Depends(get_current_user), request: Request = None):
+                    user: User = Depends(require_admin), request: Request = None):
     doc = db.get(Document, doc_id)
     if doc is None:
         raise HTTPException(404, "文档不存在")
@@ -178,22 +188,6 @@ def delete_document(doc_id: int, db: Session = Depends(get_db),
         pass
     _audit(db, user, "delete_document", summary={"doc_id": doc_id}, request=request)
     return {"ok": True}
-
-
-@router.post("/documents/{doc_id}/reparse", response_model=DocumentOut)
-def reparse_document(doc_id: int, db: Session = Depends(get_db),
-                     user: User = Depends(get_current_user), request: Request = None):
-    doc = db.get(Document, doc_id)
-    if doc is None:
-        raise HTTPException(404, "文档不存在")
-    doc.status = "排队中"
-    doc.error_msg = ""
-    db.commit()
-    db.add(Task(type="process_document", params={"doc_id": doc_id}))
-    db.commit()
-    start_worker()
-    _audit(db, user, "reparse_document", summary={"doc_id": doc_id}, request=request)
-    return doc
 
 
 # ---------- 切分块 ----------
@@ -215,7 +209,7 @@ def get_chunk(chunk_id: int, db: Session = Depends(get_db)):
 
 @router.patch("/chunks/{chunk_id}", response_model=ChunkOut)
 def update_chunk(chunk_id: int, body: ChunkUpdateIn, db: Session = Depends(get_db),
-                 user: User = Depends(get_current_user), request: Request = None):
+                 user: User = Depends(require_admin), request: Request = None):
     chunk = db.get(Chunk, chunk_id)
     if chunk is None:
         raise HTTPException(404, "切分块不存在")
@@ -240,34 +234,38 @@ def list_entities(kb_id: int, limit: int = 100, offset: int = 0,
 
 @router.post("/kbs/{kb_id}/entities")
 def create_entity(kb_id: int, body: EntityCreateIn, db: Session = Depends(get_db),
-                  user: User = Depends(get_current_user), request: Request = None):
+                  user: User = Depends(require_admin), request: Request = None):
+    # 图谱实体/关系增删不写审计：图谱内容以 graph 存储本身为准，
+    # 批量建图/手工整理会逐条刷屏（曾占审计 60%+）
     eid = get_graph_store(settings).upsert_entity(
         kb_id=kb_id, name=body.name, etype=body.type, properties=body.properties,
         source_doc_id=None, source_chunk_id=None)
-    _audit(db, user, "create_entity", summary={"kb_id": kb_id, "entity_id": eid}, request=request)
     return {"id": eid}
 
 
 @router.patch("/entities/{entity_id}")
 def update_entity(entity_id: str, body: EntityUpdateIn, db: Session = Depends(get_db),
-                  user: User = Depends(get_current_user), request: Request = None):
+                  user: User = Depends(require_admin), request: Request = None):
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     get_graph_store(settings).update_entity(entity_id, fields)
-    _audit(db, user, "update_entity", summary={"entity_id": entity_id}, request=request)
+    # 纯坐标更新（图谱画布拖拽/自动布局产生的 x/y）不写审计——高频噪音，会刷屏审计日志
+    props = fields.get("properties") or {}
+    is_pure_position = set(fields.keys()) <= {"properties"} and set(props.keys()) <= {"x", "y"}
+    if not is_pure_position:
+        _audit(db, user, "update_entity", summary={"entity_id": entity_id}, request=request)
     return {"ok": True}
 
 
 @router.delete("/entities/{entity_id}")
 def delete_entity(entity_id: str, db: Session = Depends(get_db),
-                  user: User = Depends(get_current_user), request: Request = None):
+                  user: User = Depends(require_admin), request: Request = None):
     get_graph_store(settings).delete_entity(entity_id)
-    _audit(db, user, "delete_entity", summary={"entity_id": entity_id}, request=request)
     return {"ok": True}
 
 
 @router.post("/entities/merge")
 def merge_entities(body: EntityMergeIn, db: Session = Depends(get_db),
-                   user: User = Depends(get_current_user), request: Request = None):
+                   user: User = Depends(require_admin), request: Request = None):
     if body.source_id == body.target_id:
         raise HTTPException(400, "不能合并到自身")
     try:
@@ -288,7 +286,7 @@ def list_relations(kb_id: int, limit: int = 100, offset: int = 0,
 
 @router.post("/kbs/{kb_id}/relations")
 def create_relation(kb_id: int, body: RelationCreateIn, db: Session = Depends(get_db),
-                    user: User = Depends(get_current_user), request: Request = None):
+                    user: User = Depends(require_admin), request: Request = None):
     """前端按实体 ID 建关系：先按 ID 解析实体，再按名称写入图库（图库存按名称去重）。"""
     gstore = get_graph_store(settings)
     src = gstore.get_entity(body.source_entity_id)
@@ -304,13 +302,12 @@ def create_relation(kb_id: int, body: RelationCreateIn, db: Session = Depends(ge
             source_doc_id=None, source_chunk_id=None)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    _audit(db, user, "create_relation", summary={"kb_id": kb_id, "relation_id": rid}, request=request)
     return {"id": rid}
 
 
 @router.patch("/relations/{relation_id}")
 def update_relation(relation_id: str, body: RelationUpdateIn, db: Session = Depends(get_db),
-                    user: User = Depends(get_current_user), request: Request = None):
+                    user: User = Depends(require_admin), request: Request = None):
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     get_graph_store(settings).update_relation(relation_id, fields)
     _audit(db, user, "update_relation", summary={"relation_id": relation_id}, request=request)
@@ -319,9 +316,8 @@ def update_relation(relation_id: str, body: RelationUpdateIn, db: Session = Depe
 
 @router.delete("/relations/{relation_id}")
 def delete_relation(relation_id: str, db: Session = Depends(get_db),
-                    user: User = Depends(get_current_user), request: Request = None):
+                    user: User = Depends(require_admin), request: Request = None):
     get_graph_store(settings).delete_relation(relation_id)
-    _audit(db, user, "delete_relation", summary={"relation_id": relation_id}, request=request)
     return {"ok": True}
 
 
@@ -338,7 +334,7 @@ def list_keys(db: Session = Depends(get_db)):
 
 @router.post("/keys", response_model=KeyOut)
 def create_key(body: KeyIn, db: Session = Depends(get_db),
-               user: User = Depends(get_current_user), request: Request = None):
+               user: User = Depends(require_admin), request: Request = None):
     if body.key_type not in ("search", "ingest", "full"):
         raise HTTPException(400, "key_type 只能是 search/ingest/full")
     plain = generate_api_key()
@@ -358,7 +354,7 @@ def create_key(body: KeyIn, db: Session = Depends(get_db),
 
 @router.patch("/keys/{key_id}", response_model=KeyOut)
 def update_key(key_id: int, body: KeyIn, db: Session = Depends(get_db),
-               user: User = Depends(get_current_user), request: Request = None):
+               user: User = Depends(require_admin), request: Request = None):
     key = db.get(ApiKey, key_id)
     if key is None:
         raise HTTPException(404, "密钥不存在")
@@ -374,7 +370,7 @@ def update_key(key_id: int, body: KeyIn, db: Session = Depends(get_db),
 
 @router.post("/keys/{key_id}/revoke")
 def revoke_key(key_id: int, db: Session = Depends(get_db),
-               user: User = Depends(get_current_user), request: Request = None):
+               user: User = Depends(require_admin), request: Request = None):
     key = db.get(ApiKey, key_id)
     if key is None:
         raise HTTPException(404, "密钥不存在")
@@ -384,7 +380,37 @@ def revoke_key(key_id: int, db: Session = Depends(get_db),
     return {"ok": True}
 
 
-# ---------- 检索调试（管理员视角，指定知识库） ----------
+@router.post("/keys/{key_id}/restore")
+def restore_key(key_id: int, db: Session = Depends(get_db),
+                user: User = Depends(require_admin), request: Request = None):
+    """恢复已吊销的密钥（吊销可逆）。"""
+    key = db.get(ApiKey, key_id)
+    if key is None:
+        raise HTTPException(404, "密钥不存在")
+    key.revoked = False
+    db.commit()
+    _audit(db, user, "restore_key", summary={"key_id": key_id}, request=request)
+    return {"ok": True}
+
+
+@router.delete("/keys/{key_id}")
+def delete_key(key_id: int, db: Session = Depends(get_db),
+               user: User = Depends(require_admin), request: Request = None):
+    """物理删除密钥：审计记录保留但解除该密钥归属；该密钥的会话记忆一并清除。"""
+    from ..models import AuditLog, ChatSession
+    key = db.get(ApiKey, key_id)
+    if key is None:
+        raise HTTPException(404, "密钥不存在")
+    db.query(AuditLog).filter(AuditLog.api_key_id == key_id).update(
+        {AuditLog.api_key_id: None})
+    db.query(ChatSession).filter(ChatSession.api_key_id == key_id).delete()
+    db.delete(key)
+    db.commit()
+    _audit(db, user, "delete_key", summary={"key_id": key_id}, request=request)
+    return {"ok": True}
+
+
+# ---------- 检索调试（管理员视角，指定知识库；纯查看，只读账号可用） ----------
 @router.post("/kbs/{kb_id}/debug-search")
 def debug_search(kb_id: int, body: SearchIn, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user), request: Request = None):
@@ -395,8 +421,7 @@ def debug_search(kb_id: int, body: SearchIn, db: Session = Depends(get_db),
         db, settings, body.query, [kb_id], top_k=body.top_k,
         graph_depth=body.graph_depth, enable_graph=body.enable_graph,
     )
-    _audit(db, user, "debug.search", body.query,
-           {"hits": len(result["chunks"])}, request=request)
+    # 调试台检索不写审计（管理员自查噪音，曾占审计 26%）
     return result
 
 
@@ -409,9 +434,155 @@ def list_audit(limit: int = 100, offset: int = 0, db: Session = Depends(get_db))
     return {"items": [
         {"id": r.id, "action": r.action, "query": r.query,
          "result_summary": r.result_summary, "ip": r.ip,
+         "rating": r.rating or "", "note": r.note or "",
          "created_at": r.created_at.isoformat() if r.created_at else None}
         for r in rows
     ], "total": total}
+
+
+@router.patch("/audit/{audit_id}")
+def update_audit(audit_id: int, body: AuditUpdateIn, db: Session = Depends(get_db),
+                 user: User = Depends(require_admin), request: Request = None):
+    """审计记录打标（进化学习）：rating=good（回复好可学习）/bad（回复差需复盘）/''；
+    note 记录备注。打标不写审计（避免自我刷屏）。"""
+    from ..models import AuditLog
+    row = db.get(AuditLog, audit_id)
+    if row is None:
+        raise HTTPException(404, "审计记录不存在")
+    if body.rating is not None:
+        if body.rating not in ("good", "bad", ""):
+            raise HTTPException(400, "rating 只能是 good/bad/空")
+        row.rating = body.rating
+    if body.note is not None:
+        row.note = body.note
+    db.commit()
+    return {"ok": True}
+
+
+SELFLEARN_KB_ID = 4  # 「自我学习」库：投喂回复范例 + 中文处理经验
+
+
+@router.post("/selflearn/case")
+def selflearn_case(body: dict, db: Session = Depends(get_db),
+                   user: User = Depends(require_admin), request: Request = None):
+    """把审计中打标 good 的对话沉淀进「自我学习」库（kb4）：
+    自动提炼中文处理经验 → 生成案例文档 → 走 pipeline 切分/向量入库。
+    body: {"audit_id": 123}；幂等（同一条审计只入库一次）。"""
+    from ..models import AuditLog, Document, Task as TaskModel
+    audit_id = int((body or {}).get("audit_id") or 0)
+    if audit_id <= 0:
+        raise HTTPException(400, "缺少 audit_id")
+    row = db.get(AuditLog, audit_id)
+    if row is None:
+        raise HTTPException(404, "审计记录不存在")
+    if row.rating != "good":
+        raise HTTPException(400, "只有标记为「好·可学习」的记录才能存入学习库")
+    summary = row.result_summary or {}
+    query = (row.query or "").strip()
+    answer = (summary.get("answer") or "").strip()
+    note = (row.note or "").strip()
+    if not query or not answer:
+        raise HTTPException(400, "该记录没有客户问题或回复内容，无法入库")
+
+    # 幂等：同一审计已入库则跳过
+    existing = db.query(Document).filter(
+        Document.kb_id == SELFLEARN_KB_ID,
+        Document.filename.like(f"%audit{audit_id}-%"),
+    ).first()
+    if existing is not None:
+        return {"ok": True, "skipped": True, "doc_id": existing.id}
+
+    # 用云端 LLM 提炼中文处理经验（失败则占位，不影响入库）
+    zh_experience = ""
+    try:
+        from ..services import llm as llm_svc
+        llm = llm_svc.resolve_llm(settings)
+        if llm.configured():
+            prompt = (
+                "你是售后客服经验总结助手。根据下面的客户问题与客服回复，"
+                "用简洁中文总结【处理经验】：这是什么类型的问题、核心处理逻辑与步骤、"
+                "话术要点。100字以内，只输出总结内容。\n\n"
+                f"客户问题：{query}\n客服回复：{answer[:1500]}"
+            )
+            zh = (llm.chat([{"role": "user", "content": prompt}],
+                           temperature=0.1, max_tokens=300, timeout=90) or "").strip()
+            zh_experience = zh if zh else ""
+    except Exception as exc:
+        print(f"[selflearn] 经验提炼失败（仍入库）: {str(exc)[:100]}", flush=True)
+        zh_experience = ""
+    if not zh_experience:
+        zh_experience = "（自动提炼失败，请人工补充中文处理经验；参考下方原文）"
+
+    doc_md = (
+        f"# 自动沉淀案例（审计 #{audit_id}）\n\n"
+        f"> 来源：审计日志标记「好·可学习」（{row.created_at}）｜自动沉淀到「自我学习」库\n\n"
+        f"## 问题类型：{query[:60]}\n\n"
+        f"### 中文处理经验\n\n{zh_experience}\n\n"
+        f"### 客户问题\n\n{query}\n\n"
+        f"### 参考回复（原文）\n\n{answer}\n"
+    )
+    if note:
+        doc_md += f"\n### 备注\n\n{note}\n"
+
+    # 写入 kb4 文档目录并排队入库（复用 upload 流程）
+    kb = db.get(KnowledgeBase, SELFLEARN_KB_ID)
+    if kb is None:
+        raise HTTPException(404, "「自我学习」知识库不存在")
+    doc_dir = settings.data_dir_path / "documents" / str(SELFLEARN_KB_ID)
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"audit{audit_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
+    target = doc_dir / fname
+    target.write_text(doc_md, encoding="utf-8")
+    doc = Document(
+        kb_id=SELFLEARN_KB_ID, filename=fname, file_path=str(target),
+        file_size=len(doc_md.encode("utf-8")), file_type="md", status="排队中",
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    db.add(TaskModel(type="process_document", params={"doc_id": doc.id}))
+    db.commit()
+    from ..workers import start_worker
+    start_worker()
+    return {"ok": True, "skipped": False, "doc_id": doc.id}
+
+
+@router.get("/sessions")
+def list_sessions(api_key_id: int | None = None, limit: int = 100,
+                  db: Session = Depends(get_db)):
+    """多客户会话记忆列表（按密钥过滤可选；仅查看）。"""
+    from ..models import ChatSession
+    q = db.query(ChatSession)
+    if api_key_id is not None:
+        q = q.filter(ChatSession.api_key_id == api_key_id)
+    rows = q.order_by(ChatSession.updated_at.desc()).limit(min(limit, 500)).all()
+    items = []
+    for s in rows:
+        msgs = s.messages or []
+        last_user = next((m.get("content", "") for m in reversed(msgs)
+                          if m.get("role") == "user"), "")
+        items.append({
+            "id": s.id, "api_key_id": s.api_key_id,
+            "session_id": s.session_id,
+            "turns": len(msgs) // 2,
+            "last_query": str(last_user)[:200],
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+        })
+    return {"items": items, "total": len(items)}
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: int, db: Session = Depends(get_db),
+                   user: User = Depends(require_admin), request: Request = None):
+    """删除某客户的会话记忆（清空后该客户重新开始，无历史上下文）。"""
+    from ..models import ChatSession
+    s = db.get(ChatSession, session_id)
+    if s is None:
+        raise HTTPException(404, "会话不存在")
+    db.delete(s)
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/tasks")
@@ -446,7 +617,8 @@ def dashboard(db: Session = Depends(get_db)):
 @router.post("/chat")
 def admin_chat(body: AdminChatIn, db: Session = Depends(get_db),
                user: User = Depends(get_current_user), request: Request = None):
-    """对话测试台：选 API 密钥 → 检索范围=密钥绑定 KB（不越权）、提示词=密钥配置。"""
+    """对话测试台：选 API 密钥 → 检索范围=密钥绑定 KB（不越权）、提示词=密钥配置。
+    只读账号（viewer）也可用（纯问答体验，无数据修改）；调用会记入审计 chat.test。"""
     key = db.get(ApiKey, body.api_key_id)
     if key is None:
         raise HTTPException(404, "密钥不存在")
@@ -462,13 +634,16 @@ def admin_chat(body: AdminChatIn, db: Session = Depends(get_db),
             top_k=body.top_k, graph_depth=body.graph_depth,
             temperature=body.temperature,
             prompt=key.prompt_template or None,
+            consult_type=resolve_consult_type(body.consult_type, body.is_after_sale),
+            conversation=body.context,
         )
     except LLMError as e:
         raise HTTPException(e.status_code, str(e))
     _audit(db, user, "chat.test",
            content_text(body.messages[-1].content)[:500],
-           {"api_key_id": key.id, "kb_ids": list(key.allowed_kb_ids),
-            "hits": len(result["sources"]), "answer_len": len(result["answer"])},
+           {"api_key_id": key.id, "key_name": key.name, "kb_ids": list(key.allowed_kb_ids),
+            "hits": len(result["sources"]), "answer_len": len(result["answer"]),
+            "answer": result["answer"][:800]},
            api_key_id=key.id, request=request)
     result["api_key_id"] = key.id
     result["scope_kb_ids"] = list(key.allowed_kb_ids)
@@ -479,6 +654,54 @@ def admin_chat(body: AdminChatIn, db: Session = Depends(get_db),
     else:
         result["prompt_source"] = "builtin"
     return result
+
+
+@router.post("/settings/test")
+def test_settings_api(db: Session = Depends(get_db),
+                      user: User = Depends(require_admin), request: Request = None):
+    """测试当前嵌入/大模型配置连通性（前端系统设置页「测试连接」按钮）。"""
+    import time as _time
+    results: dict = {}
+
+    # 嵌入测试
+    from ..services.embedding import get_embedder
+    try:
+        embedder = get_embedder(settings)
+        t0 = _time.time()
+        vec = embedder.embed_documents(["连接测试"])[0]
+        results["embedding"] = {
+            "ok": True, "ms": round((_time.time() - t0) * 1000),
+            "dim": len(vec), "model": settings.embedding_model,
+        }
+    except Exception as e:
+        hint = ""
+        if "11434" in settings.embedding_base_url or "localhost" in settings.embedding_base_url:
+            hint = "；本地嵌入服务（Ollama）未运行？已配置开机自启，可先手动启动 ollama serve"
+        results["embedding"] = {
+            "ok": False,
+            "error": f"{type(e).__name__}: {str(e)[:150]}{hint}",
+            "model": settings.embedding_model,
+        }
+
+    # 大模型测试
+    from ..services import llm as llm_svc
+    try:
+        llm = llm_svc.resolve_llm(settings)
+        t0 = _time.time()
+        ans = llm.chat([{"role": "user", "content": "你好"}], max_tokens=512, timeout=120)
+        results["llm"] = {
+            "ok": True, "ms": round((_time.time() - t0) * 1000),
+            "model": llm.model, "reply": (ans or "（回复为空）")[:30],
+        }
+    except Exception as e:
+        results["llm"] = {
+            "ok": False, "error": f"{type(e).__name__}: {str(e)[:150]}",
+            "model": settings.llm_model,
+        }
+    _audit(db, user, "test_settings",
+           summary={"embedding_ok": results["embedding"]["ok"], "llm_ok": results["llm"]["ok"]},
+           request=request)
+    return results
 
 
 @router.get("/settings", response_model=SettingsOut)
@@ -499,7 +722,7 @@ def get_settings_api(db: Session = Depends(get_db)):
 
 @router.put("/settings", response_model=SettingsOut)
 def update_settings_api(body: SettingsIn, db: Session = Depends(get_db),
-                        user: User = Depends(get_current_user), request: Request = None):
+                        user: User = Depends(require_admin), request: Request = None):
     for k, v in body.model_dump(exclude_none=True).items():
         if hasattr(settings, k):
             setattr(settings, k, v)

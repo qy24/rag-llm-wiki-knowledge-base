@@ -31,6 +31,13 @@ def get_current_user(
     return user
 
 
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    """写操作依赖：仅 admin 角色可执行；只读账号（viewer）403。"""
+    if user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "只读账号无修改权限")
+    return user
+
+
 @dataclass
 class KeyScope:
     api_key: ApiKey

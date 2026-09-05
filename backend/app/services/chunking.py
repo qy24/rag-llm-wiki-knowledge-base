@@ -46,7 +46,9 @@ def _split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
             chunks.append(chunk)
         if end >= len(text):
             break
-        start = max(end - overlap, start + 1)
+        # 仅当本块长度 > overlap 时才重叠（否则 overlap 会回看已切区域，
+        # 导致 start 每次只前进 1 字符、产生大量近重复碎片块——英文长段落常见）
+        start = end - overlap if (end - start) > overlap else end
     return chunks
 
 

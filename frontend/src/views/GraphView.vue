@@ -1,14 +1,25 @@
 <template>
   <div class="page-card">
     <div class="toolbar">
-      <el-select v-model="kbId" placeholder="选择知识库" style="width: 220px" @change="load">
+      <el-select v-model="kbId" placeholder="选择知识库" style="width: 200px" @change="load">
         <el-option v-for="k in kbs" :key="k.id" :label="k.name" :value="k.id" />
       </el-select>
+      <el-select v-model="docFilter" placeholder="全部文档" style="width: 220px" :disabled="!kbId" @change="renderGraph">
+        <el-option label="全部文档（合并展示）" :value="0" />
+        <el-option v-for="d in docs" :key="d.id" :label="d.filename" :value="d.id" />
+      </el-select>
       <el-button type="primary" :disabled="!kbId" @click="load">加载图谱</el-button>
+      <el-select v-model="layoutType" style="width: 170px" :disabled="!kbId" @change="onLayoutChange">
+        <el-option label="布局：自动判断" value="auto" />
+        <el-option label="布局：金字塔分层" value="layered" />
+        <el-option label="布局：神经元力导向" value="force" />
+      </el-select>
       <el-button type="success" :disabled="!kbId" @click="addEntityDialog = true">新增实体</el-button>
       <el-button type="warning" :disabled="!kbId" @click="addRelationDialog = true">新增关系</el-button>
-      <el-button type="info" :disabled="!kbId" @click="autoLayout">🔄 自动布局</el-button>
-      <span style="color:#909399;font-size:12px;margin-left:4px">自动布局：按层级排列（大节点在上），减少交叉，自动保存</span>
+      <el-button type="info" :disabled="!kbId" @click="autoLayout">🔄 重新布局</el-button>
+      <span style="color:#909399;font-size:12px;margin-left:4px">
+        规整层级数据用金字塔分层，网状数据用神经元力导向；选择自动判断更省心
+      </span>
     </div>
 
     <el-row :gutter="12">
@@ -165,6 +176,8 @@ watch(kbId, (v) => setLastKb(v))
 const container = ref<HTMLElement>()
 const entities = ref<EntityItem[]>([])
 const relations = ref<RelationItem[]>([])
+const docs = ref<{ id: number; filename: string }[]>([])
+const docFilter = ref(0) // 0=全部文档；>0=按文档过滤展示
 const selected = ref<EntityItem | null>(null)
 const relatedChunk = ref<ChunkItem | null>(null)
 const imageUrl = ref('')
@@ -239,13 +252,38 @@ function layeredPositions(
     byLevel.get(l)!.push(n.id)
   })
   const levels = [...byLevel.keys()].sort((a, b) => a - b)
-  levels.forEach((l) => {
-    byLevel.get(l)!.sort((a, b) => (labelOf.get(a) || '').localeCompare(labelOf.get(b) || '', 'zh'))
-  })
 
-  // Barycenter 减交叉：每层按"邻居在各自层的平均序号"排序，迭代 5 次
+  // Barycenter 减交叉：先按"父节点位置优先"排序（同一父节点的子节点相邻，父子连线不交叉），
+  // 再迭代 5 次按邻居平均位置微调
   const indexIn = new Map<number, Map<string, number>>()
   levels.forEach((l) => {
+    const m = new Map<string, number>()
+    byLevel.get(l)!.forEach((id, i) => m.set(id, i))
+    indexIn.set(l, m)
+  })
+  // 父节点排名：节点在上一层邻居（父）中的最小序号；无父 → 按名称
+  const parentRank = (id: string, l: number): number => {
+    let best = Infinity
+    edgeList.forEach((e) => {
+      let other = ''
+      if (e.source === id && idSet.has(e.target)) other = e.target
+      if (e.target === id && idSet.has(e.source)) other = e.source
+      if (!other) return
+      const nl = level.get(other)!
+      if (nl < l) {
+        const idx = indexIn.get(nl)?.get(other)
+        if (idx !== undefined && idx < best) best = idx
+      }
+    })
+    return best
+  }
+  levels.forEach((l) => {
+    byLevel.get(l)!.sort((a, b) => {
+      const pa = parentRank(a, l)
+      const pb = parentRank(b, l)
+      if (pa !== pb) return pa - pb
+      return (labelOf.get(a) || '').localeCompare(labelOf.get(b) || '', 'zh')
+    })
     const m = new Map<string, number>()
     byLevel.get(l)!.forEach((id, i) => m.set(id, i))
     indexIn.set(l, m)
@@ -275,17 +313,29 @@ function layeredPositions(
     })
   }
 
-  // 坐标分配：统一间距（下限 110px 防重叠），层级间距固定 170px（上下拉开）
+  // 坐标分配：统一间距（下限 110px 防重叠）；宽层折行放宽到每行 10 个（父子尽量同排不拆散，
+  // 减少行间连线交叉）；层级间距 170px（跨层），子行间距 80px
+  const MAX_PER_ROW = 10
+  const ROW_GAP = 80
   const maxLabel = Math.max(...nodeList.map((n) => (labelOf.get(n.id) || '').length), 2)
   const nodeW = Math.min(Math.max(maxLabel * 13 + 40, 110), 190)
   const layerH = 170
   const pos = new Map<string, { x: number; y: number }>()
   levels.forEach((l) => {
     const ids = byLevel.get(l)!
-    const rowW = ids.length * nodeW
-    const x0 = rowW > w - 20 ? 10 : (w - rowW) / 2
-    ids.forEach((id, i) => {
-      pos.set(id, { x: x0 + nodeW / 2 + i * nodeW, y: 60 + l * layerH })
+    // 拆行：ceil(n/MAX) 行，每行尽量均衡（8 一行，14 → 7+7，15 → 5+5+5）
+    const rowCount = Math.max(1, Math.ceil(ids.length / MAX_PER_ROW))
+    const perRow = Math.ceil(ids.length / rowCount)
+    const rows: string[][] = []
+    for (let r = 0; r < rowCount; r++) rows.push(ids.slice(r * perRow, (r + 1) * perRow))
+    const maxRowW = Math.max(...rows.map((r) => r.length * nodeW))
+    const x0 = maxRowW > w - 20 ? 10 : (w - maxRowW) / 2
+    rows.forEach((row, ri) => {
+      const rowW = row.length * nodeW
+      const rowX0 = x0 + (maxRowW - rowW) / 2 // 子行相对整层居中
+      row.forEach((id, i) => {
+        pos.set(id, { x: rowX0 + nodeW / 2 + i * nodeW, y: 60 + l * layerH + ri * ROW_GAP })
+      })
     })
   })
   return pos
@@ -293,28 +343,35 @@ function layeredPositions(
 
 async function autoLayout() {
   if (!container.value || !graph) return
-  const pos = layeredPositions(
-    entities.value.map((e) => ({ id: e.id, label: e.name })),
-    relations.value.map((r) => ({ source: r.source_entity_id, target: r.target_entity_id })),
-    container.value.clientWidth, container.value.clientHeight,
-  )
-  // 应用到画布
-  graph.getNodes().forEach((n: any) => {
-    const m = n.getModel()
-    const p = pos.get(m.id)
-    if (p) graph.updateItem(n, { x: p.x, y: p.y })
-  })
-  // 保存坐标（覆盖旧乱坐标，刷新后仍整齐）
-  await Promise.all(
-    entities.value.map((e) => {
-      const p = pos.get(e.id)
-      if (!p) return Promise.resolve(null)
-      return client.patch(`/admin/entities/${e.id}`, {
-        properties: { ...(e.properties || {}), x: Math.round(p.x), y: Math.round(p.y) },
-      }).catch(() => null)
-    }),
-  )
-  ElMessage.success('已按层级自动布局并保存')
+  if (effectiveLayout() === 'force') {
+    // force：先重置节点位置到画布中心附近，再重新力导向——
+    // 否则每次都在上次位置基础上继续施力，孤立节点（无边）会被越推越远
+    const w = container.value.clientWidth
+    const h = container.value.clientHeight
+    const cx = w / 2
+    const cy = h / 2
+    graph.getNodes().forEach((n: any) => {
+      graph.updateItem(n, {
+        x: cx + (Math.random() - 0.5) * w * 0.4,
+        y: cy + (Math.random() - 0.5) * h * 0.4,
+      })
+    })
+    graph.updateLayout({ ...FORCE_LAYOUT })
+    ElMessage.success('已按神经元力导向重新布局')
+  } else {
+    // 金字塔分层：重新计算分层坐标并应用
+    const pos = layeredPositions(
+      entities.value.map((e) => ({ id: e.id, label: e.name })),
+      relations.value.map((r) => ({ source: r.source_entity_id, target: r.target_entity_id })),
+      container.value.clientWidth, container.value.clientHeight,
+    )
+    graph.getNodes().forEach((n: any) => {
+      const m = n.getModel()
+      const p = pos.get(m.id)
+      if (p) graph.updateItem(n, { x: p.x, y: p.y })
+    })
+    ElMessage.success('已按金字塔分层重新布局')
+  }
 }
 
 // 选中实体已有的全部关系（出 + 入）
@@ -372,6 +429,15 @@ async function saveRelationType() {
 
 async function load() {
   if (!kbId.value) return
+  // 同步当前知识库的布局偏好
+  const kb = kbs.value.find((k) => k.id === kbId.value)
+  layoutType.value = (kb?.layout_type as any) || 'auto'
+  // 拉取当前库文档列表（图谱按文档过滤展示用）
+  const { data: allDocs } = await client.get('/admin/documents')
+  docs.value = allDocs.filter((d: any) => d.kb_id === kbId.value)
+  if (docFilter.value !== 0 && !docs.value.some((d) => d.id === docFilter.value)) {
+    docFilter.value = 0
+  }
   const [eRes, rRes] = await Promise.all([
     client.get(`/admin/kbs/${kbId.value}/entities`, { params: { limit: 500 } }),
     client.get(`/admin/kbs/${kbId.value}/relations`, { params: { limit: 500 } }),
@@ -381,47 +447,97 @@ async function load() {
   renderGraph()
 }
 
+// 力导向布局配置（神经元式：节点按关系自然聚拢、边清晰）
+const FORCE_LAYOUT = {
+  type: 'force',
+  preventOverlap: true,
+  linkDistance: 300,    // 边长度拉大（有关系的节点靠得近但边间隙大，减少线重叠）
+  nodeStrength: -220,   // 节点间排斥力加大（节点更分散，边更分开）
+  edgeStrength: 0.25,   // 边拉力适中（配合更长距离）
+  damping: 0.9,
+  maxIteration: 700,
+}
+
+// 布局选择（当前知识库）：auto 时按图谱结构自动判断
+const layoutType = ref<'auto' | 'layered' | 'force'>('auto')
+
+function effectiveLayout(): 'layered' | 'force' {
+  if (layoutType.value === 'layered' || layoutType.value === 'force') return layoutType.value
+  // 自动判断：入度 0 的顶级节点很少（≤3，层级分明）→ 金字塔分层；否则网状 → 神经元
+  const ids = new Set(entities.value.map((e) => e.id))
+  const inDeg = new Map<string, number>()
+  entities.value.forEach((e) => inDeg.set(e.id, 0))
+  relations.value.forEach((r) => {
+    if (ids.has(r.source_entity_id) && ids.has(r.target_entity_id)) {
+      inDeg.set(r.target_entity_id, (inDeg.get(r.target_entity_id) || 0) + 1)
+    }
+  })
+  const roots = [...inDeg.values()].filter((d) => d === 0).length
+  return roots <= 3 ? 'layered' : 'force'
+}
+
+async function onLayoutChange() {
+  // 持久化到知识库（下次打开同样布局）
+  if (!kbId.value) return
+  try {
+    await client.patch(`/admin/kbs/${kbId.value}`, { layout_type: layoutType.value })
+    ElMessage.success('布局偏好已保存')
+  } catch {
+    /* 保存失败不影响本次渲染 */
+  }
+  load()
+}
+
 function renderGraph() {
   if (!container.value) return
-  // 记录当前画布各节点坐标（重绘后保持位置不乱动）
-  const posMap = new Map<string, { x: number; y: number }>()
   if (graph) {
-    graph.getNodes().forEach((n: any) => {
-      const m = n.getModel()
-      posMap.set(m.id, { x: m.x, y: m.y })
-    })
     graph.destroy()
     graph = null
   }
-  const w = container.value.clientWidth
-  const h = container.value.clientHeight
-  // 无任何保存坐标时（新库/未拖拽过）默认按层级布局，避免散乱
-  const hasAnySaved = entities.value.some((e) => typeof (e.properties as any)?.x === 'number')
-  const layoutPos = hasAnySaved
-    ? null
-    : layeredPositions(
-        entities.value.map((e) => ({ id: e.id, label: e.name })),
-        relations.value.map((r) => ({ source: r.source_entity_id, target: r.target_entity_id })),
-        w, h,
-      )
-  const nodes = entities.value.map((e) => {
-    const saved = (e.properties as any) || {}
-    const pos = posMap.get(e.id) || saved
-    const lp = layoutPos?.get(e.id)
-    const x = typeof pos.x === 'number' ? pos.x : lp ? lp.x : 80 + ((e.id.charCodeAt(0) * 97) % Math.max(w - 160, 100))
-    const y = typeof pos.y === 'number' ? pos.y : lp ? lp.y : 80 + ((e.id.charCodeAt(1) * 53) % Math.max(h - 160, 100))
+  container.value.querySelectorAll('.graph-empty-tip').forEach((el) => el.remove())
+  // 按文档过滤展示（0=全部；>0=只展示该文档抽取的实体及其关联关系）
+  let showEntities = entities.value
+  let showRelations = relations.value
+  if (docFilter.value !== 0) {
+    showEntities = entities.value.filter((e) => e.source_doc_id === docFilter.value)
+    const entIds = new Set(showEntities.map((e) => e.id))
+    showRelations = relations.value.filter(
+      (r) => entIds.has(r.source_entity_id) && entIds.has(r.target_entity_id),
+    )
+  }
+  if (!showEntities.length) {
+    // 空画布提示
+    const empty = document.createElement('div')
+    empty.className = 'graph-empty-tip'
+    empty.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#909399;font-size:13px'
+    empty.textContent = docFilter.value !== 0 ? '该文档暂无可展示的图谱实体（图谱抽取可能未完成）' : '暂无图谱数据'
+    container.value.appendChild(empty)
+    return
+  }
+  const useForce = effectiveLayout() === 'force'
+  let layeredPos: Map<string, { x: number; y: number }> | null = null
+  if (!useForce) {
+    const w = container.value.clientWidth
+    const h = container.value.clientHeight
+    layeredPos = layeredPositions(
+      showEntities.map((e) => ({ id: e.id, label: e.name })),
+      showRelations.map((r) => ({ source: r.source_entity_id, target: r.target_entity_id })),
+      w, h,
+    )
+  }
+  const nodes = showEntities.map((e) => {
+    const lp = layeredPos?.get(e.id)
     return {
       id: e.id,
       label: e.name,
       type: e.type,
-      x,
-      y,
+      ...(lp ? { x: lp.x, y: lp.y } : {}),
       size: 34, // 节点统一大小，名称显示在节点下方（不溢出、整齐）
       labelCfg: { position: 'bottom', offset: 10, style: { fontSize: 12 } },
       style: { fill: e.verified ? '#67c23a' : '#409eff', stroke: '#333' },
     }
   })
-  const edges = relations.value.map((r) => ({
+  const edges = showRelations.map((r) => ({
     source: r.source_entity_id,
     target: r.target_entity_id,
     label: r.relation_type,
@@ -434,7 +550,7 @@ function renderGraph() {
       height: container.value!.clientHeight,
       fitView: true,
       modes: { default: ['drag-canvas', 'zoom-canvas', 'drag-node'] },
-      layout: { type: 'none' },  // 不自动重排，保持节点位置
+      layout: useForce ? FORCE_LAYOUT : { type: 'none' },  // 神经元力导向 / 金字塔分层（坐标已算好）
       defaultNode: { type: 'circle', labelCfg: { style: { fontSize: 11 } } },
       defaultEdge: { labelCfg: { autoRotate: true, style: { fontSize: 9 } } },
       data: { nodes, edges },

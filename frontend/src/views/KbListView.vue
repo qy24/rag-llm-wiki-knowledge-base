@@ -1,7 +1,7 @@
 <template>
   <div class="page-card">
     <div class="toolbar">
-      <el-button type="primary" @click="dialog = true">新建知识库</el-button>
+      <el-button v-if="auth.isAdmin" type="primary" @click="dialog = true">新建知识库</el-button>
     </div>
     <el-table :data="kbs" border>
       <el-table-column prop="id" label="ID" width="60" />
@@ -9,19 +9,25 @@
       <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
       <el-table-column prop="chunk_size" label="切分大小" width="100" />
       <el-table-column prop="chunk_overlap" label="重叠" width="80" />
-      <el-table-column label="图谱抽取" width="100">
+      <el-table-column label="图谱抽取" width="110">
         <template #default="{ row }">
-          <el-tag :type="row.graph_extraction_enabled ? 'success' : 'info'" size="small">
+          <el-switch
+            v-if="auth.isAdmin"
+            :model-value="row.graph_extraction_enabled"
+            :disabled="row._saving"
+            @change="(v: boolean) => toggleGraphExtraction(row, v)"
+          />
+          <el-tag v-else :type="row.graph_extraction_enabled ? 'success' : 'info'" size="small">
             {{ row.graph_extraction_enabled ? '开启' : '关闭' }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="300">
+      <el-table-column label="操作" :width="auth.isAdmin ? 300 : 220">
         <template #default="{ row }">
           <el-button size="small" type="primary" link @click="$router.push('/documents?kb=' + row.id)">文档</el-button>
           <el-button size="small" type="success" link @click="$router.push('/graph?kb=' + row.id)">图谱</el-button>
           <el-button size="small" type="warning" link @click="$router.push('/chunks?kb=' + row.id)">切分块</el-button>
-          <el-button size="small" type="danger" link @click="remove(row)">删除</el-button>
+          <el-button v-if="auth.isAdmin" size="small" type="danger" link @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -46,8 +52,10 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import client from '../api/client'
+import { useAuthStore } from '../stores/auth'
 import type { KB } from '../api/types'
 
+const auth = useAuthStore()
 const kbs = ref<KB[]>([])
 const dialog = ref(false)
 const form = reactive({
@@ -73,6 +81,17 @@ async function remove(row: KB) {
   await client.delete(`/admin/kbs/${row.id}`)
   ElMessage.success('已删除')
   load()
+}
+
+async function toggleGraphExtraction(row: any, v: boolean) {
+  row._saving = true
+  try {
+    await client.patch(`/admin/kbs/${row.id}`, { graph_extraction_enabled: v })
+    row.graph_extraction_enabled = v
+    ElMessage.success(v ? '已开启图谱抽取（对之后处理的文档生效）' : '已关闭图谱抽取（文档只切分+向量）')
+  } finally {
+    row._saving = false
+  }
 }
 
 onMounted(load)

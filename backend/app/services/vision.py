@@ -19,7 +19,7 @@ from ..config import Settings
 from ..models import Document
 from ..schemas import ChatMessage, content_text, content_to_parts
 from . import llm as llm_svc
-from .rag import DEFAULT_ANSWER_SYSTEM
+from .rag import DEFAULT_ANSWER_SYSTEM, fetch_good_examples
 from .retrieval import format_graph_context, search_knowledge
 
 # 单次请求最多接收的用户附图数量
@@ -72,10 +72,12 @@ def prepare_content_parts(content: str | list) -> list[dict]:
 
 def visual_chat(db: Session, settings: Settings, kb_ids: list[int],
                 messages: list[ChatMessage], top_k: int = 8,
-                graph_depth: int = 1, llm=None, prompt: str | None = None) -> dict:
+                graph_depth: int = 1, llm=None, prompt: str | None = None,
+                consult_type: str = "aftersale") -> dict:
     """视觉 RAG 主流程（调用方已确认末条消息含图片且 llm 支持视觉）。
 
     prompt 为回答系统提示词（已按 密钥>全局>内置 解析）；None 时用内置默认。
+    consult_type: presale=售前咨询 / aftersale=售后（默认），见 rag_chat。
     返回 {"answer", "search_query", "internal_images", "sources", "graph", "prompt"}。
     """
     if llm is None:
@@ -116,7 +118,22 @@ def visual_chat(db: Session, settings: Settings, kb_ids: list[int],
     if graph_ctx:
         context = context + "\n\n" + graph_ctx
     template = prompt or DEFAULT_ANSWER_SYSTEM
-    system = template + "\n\n【参考知识】\n" + context
+    # 售前/售后场景说明（与 rag.py 文本分支一致；手册数据已含同规则）
+    if (consult_type or "aftersale") == "presale":
+        scene_note = ("【当前客户阶段：售前咨询】直接根据问题提供产品介绍、参数、功能、"
+                      "购买建议等回复；不涉及售后流程，不要索要订单号。")
+    else:
+        scene_note = ("【当前客户阶段：售后处理】默认该客户订单已存在，直接根据问题给出"
+                      "解决方案，不因缺少订单号而索要或卡住流程；确需收货地址等补发信息时"
+                      "一次性询问即可。")
+    system = template + "\n\n" + scene_note + "\n\n【参考知识】\n" + context
+    # 进化学习：注入相似的历史优质回复作为风格参考（仅参考语气/结构，内容以参考知识为准）
+    examples = fetch_good_examples(db, search_query)
+    if examples:
+        ex_text = "\n\n".join(
+            f"客户问：{e['query']}\n参考回复：{e['answer']}" for e in examples)
+        system += ("\n\n【历史优质回复参考】（仅参考语气与结构，不要照抄，"
+                   "内容一律以【参考知识】为准）\n" + ex_text)
 
     # 5) 视觉生成：历史消息原样转发 + 末条消息（已压缩的用户附图）追加内部图片
     llm_messages: list[dict] = [{"role": "system", "content": system}]

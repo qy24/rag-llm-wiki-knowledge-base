@@ -7,9 +7,8 @@
       </span>
     </div>
 
-    <el-table :data="keys" border>
-      <el-table-column prop="id" label="ID" width="60" />
-      <el-table-column prop="name" label="名称" min-width="120" />
+    <el-table :data="pagedKeys" border>
+      <el-table-column prop="name" label="名称" min-width="140" />
       <el-table-column prop="key_type" label="类型" width="90">
         <template #default="{ row }">
           <el-tag size="small">{{ row.key_type }}</el-tag>
@@ -39,20 +38,34 @@
       <el-table-column label="状态" width="90">
         <template #default="{ row }">
           <el-tag :type="row.revoked ? 'danger' : 'success'" size="small">
-            {{ row.revoked ? '已吊销' : '有效' }}
+            {{ row.revoked ? '无效' : '有效' }}
           </el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="last_used_at" label="最近使用" width="160">
         <template #default="{ row }">{{ row.last_used_at || '—' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="150">
+      <el-table-column label="操作" width="170">
         <template #default="{ row }">
-          <el-button v-if="!row.revoked" size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
-          <el-button v-if="!row.revoked" size="small" type="danger" link @click="revoke(row)">吊销</el-button>
+          <template v-if="!row.revoked">
+            <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
+            <el-button size="small" type="warning" link @click="revoke(row)">吊销</el-button>
+          </template>
+          <el-button v-else size="small" type="success" link @click="restore(row)">恢复</el-button>
+          <el-button size="small" type="danger" link @click="removeKey(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
+
+    <div style="margin-top: 12px; display: flex; justify-content: flex-end">
+      <el-pagination
+        layout="prev, pager, next, total"
+        :total="keys.length"
+        :page-size="pageSize"
+        v-model:current-page="page"
+        background
+      />
+    </div>
 
     <el-dialog v-model="dialog" title="创建密钥" width="560px">
       <el-form label-width="100px">
@@ -114,7 +127,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import client from '../api/client'
 import type { ApiKeyItem, KB } from '../api/types'
@@ -127,6 +140,13 @@ const editId = ref<number | null>(null)
 const plainDialog = ref(false)
 const plainKey = ref('')
 const form = reactive({ name: '', key_type: 'search', allowed_kb_ids: [] as number[], prompt_template: '' })
+
+// 分页：每页 8 条，翻页查看，无需长页下滑
+const page = ref(1)
+const pageSize = 8
+const pagedKeys = computed(() =>
+  keys.value.slice((page.value - 1) * pageSize, page.value * pageSize),
+)
 
 // 知识库 ID -> 名称（按"知识库管理"中的名称展示；查不到时兜底显示 #ID）
 function kbName(id: number): string {
@@ -174,9 +194,30 @@ function copyKey() {
 }
 
 async function revoke(row: ApiKeyItem) {
-  await ElMessageBox.confirm(`吊销密钥「${row.name}」？吊销后立即失效。`, '警告', { type: 'warning' })
+  await ElMessageBox.confirm(`吊销密钥「${row.name}」？吊销后立即失效（可随时恢复）。`, '确认吊销', { type: 'warning' })
   await client.post(`/admin/keys/${row.id}/revoke`)
-  ElMessage.success('已吊销')
+  ElMessage.success('已吊销，状态为无效')
+  load()
+}
+
+async function restore(row: ApiKeyItem) {
+  await client.post(`/admin/keys/${row.id}/restore`)
+  ElMessage.success('已恢复，状态为有效')
+  load()
+}
+
+async function removeKey(row: ApiKeyItem) {
+  await ElMessageBox.confirm(
+    `删除密钥「${row.name}」？删除后不可恢复，其会话记忆将一并清除（审计记录保留）。`,
+    '确认删除',
+    { type: 'warning', confirmButtonText: '删除', confirmButtonClass: 'el-button--danger' },
+  )
+  await client.delete(`/admin/keys/${row.id}`)
+  ElMessage.success('已删除')
+  // 删除后修正页码，避免超出总页数
+  if (page.value > 1 && keys.value.length <= (page.value - 1) * pageSize) {
+    page.value = Math.max(1, page.value - 1)
+  }
   load()
 }
 

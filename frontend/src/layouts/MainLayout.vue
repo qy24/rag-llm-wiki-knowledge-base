@@ -35,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
@@ -43,18 +43,27 @@ const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
 
-const menus = [
-  { path: '/dashboard', title: '工作台' },
-  { path: '/kbs', title: '知识库管理' },
-  { path: '/documents', title: '文档管理' },
-  { path: '/chunks', title: '切分块管理' },
-  { path: '/graph', title: '知识图谱' },
-  { path: '/search', title: '检索调试台' },
-  { path: '/chat', title: '对话测试台' },
-  { path: '/keys', title: '密钥管理' },
-  { path: '/audit', title: '审计日志' },
-  { path: '/settings', title: '系统设置' },
-]
+// 只读账号（viewer）：隐藏仅管理员可用的入口（对话测试台/密钥管理/系统设置）
+const menus = computed(() => {
+  const all = [
+    { path: '/dashboard', title: '工作台' },
+    { path: '/kbs', title: '知识库管理' },
+    { path: '/documents', title: '文档管理' },
+    { path: '/chunks', title: '切分块管理' },
+    { path: '/graph', title: '知识图谱' },
+    { path: '/search', title: '检索调试台' },
+    { path: '/chat', title: '对话测试台' },
+    { path: '/keys', title: '密钥管理' },
+    { path: '/audit', title: '审计日志' },
+    { path: '/settings', title: '系统设置' },
+  ]
+  // 只读账号（viewer）：隐藏仅管理员可用的入口（密钥管理/系统设置）；
+  // 对话测试台对 viewer 开放（纯问答体验，无数据修改）
+  if (!auth.isAdmin) {
+    return all.filter((m) => !['/keys', '/settings'].includes(m.path))
+  }
+  return all
+})
 
 const activePath = computed(() => route.path)
 
@@ -62,6 +71,17 @@ function logout() {
   auth.logout()
   router.push('/login')
 }
+
+// 刷新页面后恢复用户信息（否则 isAdmin 无法判断）
+onMounted(async () => {
+  if (auth.token && !auth.user) {
+    try {
+      await auth.fetchMe()
+    } catch {
+      /* token 无效时由拦截器跳登录 */
+    }
+  }
+})
 </script>
 
 <style scoped>

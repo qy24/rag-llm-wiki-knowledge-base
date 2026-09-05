@@ -5,6 +5,7 @@
         <el-option v-for="k in kbs" :key="k.id" :label="k.name" :value="k.id" />
       </el-select>
       <el-upload
+        v-if="auth.isAdmin"
         :show-file-list="false"
         :http-request="upload"
         accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,.pptx,.xlsx"
@@ -26,12 +27,11 @@
         </template>
       </el-table-column>
       <el-table-column prop="error_msg" label="错误信息" min-width="160" show-overflow-tooltip />
-      <el-table-column label="操作" width="240">
+      <el-table-column label="操作" :width="auth.isAdmin ? 180 : 120">
         <template #default="{ row }">
           <el-button size="small" type="primary" link
                      @click="$router.push('/chunks?kb=' + kbId + '&doc=' + row.id)">切分块</el-button>
-          <el-button size="small" type="warning" link @click="reparse(row)">重解析</el-button>
-          <el-button size="small" type="danger" link @click="remove(row)">删除</el-button>
+          <el-button v-if="auth.isAdmin" size="small" type="danger" link @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -43,8 +43,11 @@ import { onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import client from '../api/client'
+import { useAuthStore } from '../stores/auth'
 import type { DocumentItem, KB } from '../api/types'
 import { getLastKb, setLastKb } from '../utils/kbStorage'
+
+const auth = useAuthStore()
 
 const route = useRoute()
 const kbs = ref<KB[]>([])
@@ -79,12 +82,6 @@ async function upload(opt: any) {
   await client.post(`/admin/kbs/${kbId.value}/documents`, fd)
   ElMessage.success(`已上传：${opt.file.name}`)
   opt.onSuccess?.({})
-  load()
-}
-
-async function reparse(row: DocumentItem) {
-  await client.post(`/admin/documents/${row.id}/reparse`)
-  ElMessage.success('已重新排队解析')
   load()
 }
 

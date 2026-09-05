@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -42,6 +43,8 @@ class KnowledgeBase(Base):
     llm_base_url: Mapped[str] = mapped_column(String(256), default="")
     llm_api_key: Mapped[str] = mapped_column(String(256), default="")
     llm_model: Mapped[str] = mapped_column(String(128), default="")
+    # 图谱画布布局偏好：auto(自动判断) | layered(金字塔分层) | force(神经元力导向)
+    layout_type: Mapped[str] = mapped_column(String(16), default="auto")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -111,6 +114,9 @@ class AuditLog(Base):
     query: Mapped[str] = mapped_column(Text, default="")
     result_summary: Mapped[dict] = mapped_column(JSON, default=dict)
     ip: Mapped[str] = mapped_column(String(64), default="")
+    # 进化学习：人工打标（good=回复好可学习 / bad=回复差需复盘 / ''=未评）+ 备注
+    rating: Mapped[str] = mapped_column(String(16), default="")
+    note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -135,3 +141,23 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ChatSession(Base):
+    """多客户会话记忆：按 (api_key_id, session_id) 隔离每个客户的对话上下文。
+
+    - session_id = 客户唯一标识（如买家邮箱 / 订单号 / 线程 ID）
+    - messages 存该客户最近 N 轮的 {role, content}（纯文本；图片仅当次有效不入库）
+    - 多租户：不同密钥/不同客户互不可见；每个客户自动恢复上次上下文接着处理
+    """
+    __tablename__ = "chat_sessions"
+    __table_args__ = (UniqueConstraint("api_key_id", "session_id", name="uq_session_scope"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    api_key_id: Mapped[int] = mapped_column(Integer, index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    messages: Mapped[dict] = mapped_column(JSON, default=list)  # [{role, content}]
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )

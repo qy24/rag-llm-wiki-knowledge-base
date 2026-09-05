@@ -80,7 +80,8 @@ class Settings(BaseSettings):
     default_chunk_size: int = 512
     default_chunk_overlap: int = 64
     graph_extraction_enabled: bool = True
-    graph_batch_chunks: int = 8
+    # 图谱抽取每批切分块数：思考模型（deepseek 系）大批次抽取质量差且易超时，用小批次更稳
+    graph_batch_chunks: int = 3
 
     # MCP
     mcp_enabled: bool = True

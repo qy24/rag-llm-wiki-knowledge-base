@@ -42,9 +42,34 @@
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="save">保存设置</el-button>
+          <el-button type="success" :loading="testing" @click="test">测试连接</el-button>
           <span style="color: #909399; font-size: 12px; margin-left: 12px">
-            密钥留空则保持原值；知识库也可单独配置自己的大模型
+            改完配置先点「测试连接」确认可用，再保存
           </span>
+        </el-form-item>
+        <el-form-item v-if="testResult">
+          <div style="width: 100%">
+            <div style="margin-bottom: 6px">
+              <el-tag :type="testResult.embedding?.ok ? 'success' : 'danger'" size="small">
+                嵌入 {{ testResult.embedding?.ok ? '✓ 正常' : '✗ 失败' }}
+              </el-tag>
+              <span style="font-size: 12px; color: #606266; margin-left: 8px">
+                {{ testResult.embedding?.model }}{{ testResult.embedding?.ok
+                  ? `（${testResult.embedding.ms}ms · ${testResult.embedding.dim}维）`
+                  : `：${testResult.embedding?.error}` }}
+              </span>
+            </div>
+            <div>
+              <el-tag :type="testResult.llm?.ok ? 'success' : 'danger'" size="small">
+                大模型 {{ testResult.llm?.ok ? '✓ 正常' : '✗ 失败' }}
+              </el-tag>
+              <span style="font-size: 12px; color: #606266; margin-left: 8px">
+                {{ testResult.llm?.model }}{{ testResult.llm?.ok
+                  ? `（${testResult.llm.ms}ms · ${testResult.llm.reply}）`
+                  : `：${testResult.llm?.error}` }}
+              </span>
+            </div>
+          </div>
         </el-form-item>
       </el-form>
     </el-card>
@@ -62,6 +87,29 @@ const form = reactive({
   graph_extraction_enabled: true, prompt_answer_system: '',
 })
 const masked = ref<any>({})
+const testing = ref(false)
+const testResult = ref<any>(null)
+
+async function test() {
+  testing.value = true
+  testResult.value = null
+  try {
+    // 先把表单里的值临时应用到服务端再测（未保存也能测），测完回读
+    const body: any = { ...form }
+    if (!body.embedding_api_key) delete body.embedding_api_key
+    if (!body.llm_api_key) delete body.llm_api_key
+    await client.put('/admin/settings', body)
+    const { data } = await client.post('/admin/settings/test')
+    testResult.value = data
+    if (data.embedding?.ok && data.llm?.ok) ElMessage.success('嵌入与大模型均连接正常 ✓')
+    else ElMessage.warning('部分配置不可用，请查看下方详情')
+  } catch (e: any) {
+    ElMessage.error(`测试失败：${e?.response?.data?.detail || e?.message || e}`)
+  } finally {
+    testing.value = false
+    load()
+  }
+}
 
 async function load() {
   const { data } = await client.get('/admin/settings')

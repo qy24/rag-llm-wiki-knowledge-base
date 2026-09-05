@@ -26,6 +26,9 @@ def _read_markdown(path: Path) -> list[dict]:
                                "meta": {"page": len(blocks) + 1, "heading": current_heading}})
                 buffer = []
             current_heading = m.group(2).strip()
+            # 标题行本身也写入块内容——保证切分块自带标题上下文
+            # （否则标题只存在 meta.heading，切分块正文与标题分离，检索/展示都缺标题）
+            buffer.append(line)
         else:
             buffer.append(line)
     if buffer:

@@ -61,11 +61,34 @@ def layered_positions(nodes, edges, w=1200, h=700):
     for n in nodes:
         by_level.setdefault(level[n["id"]], []).append(n["id"])
     levels = sorted(by_level.keys())
+
+    # 父节点位置优先排序（同一父节点的子节点相邻，父子连线不交叉）+ 名称兜底
+    index_in = {l: {i: k for k, i in enumerate(by_level[l])} for l in levels}
+
+    def parent_rank(node_id, l):
+        best = None
+        for e in edges:
+            other = None
+            if e["source"] == node_id and e["target"] in id_set:
+                other = e["target"]
+            if e["target"] == node_id and e["source"] in id_set:
+                other = e["source"]
+            if other is None:
+                continue
+            nl = level.get(other)
+            if nl is not None and nl < l:
+                idx = index_in.get(nl, {}).get(other)
+                if idx is not None and (best is None or idx < best):
+                    best = idx
+        return best
+
     for l in levels:
-        by_level[l].sort(key=lambda x: label_of.get(x, ""))
+        by_level[l].sort(key=lambda x: (
+            parent_rank(x, l) if parent_rank(x, l) is not None else 10**9,
+            label_of.get(x, "")))
+        index_in[l] = {i: k for k, i in enumerate(by_level[l])}
 
     # Barycenter 减交叉（迭代 5 次）
-    index_in = {l: {i: k for k, i in enumerate(by_level[l])} for l in levels}
     for _ in range(5):
         for l in levels:
             ids = by_level[l]
@@ -93,13 +116,23 @@ def layered_positions(nodes, edges, w=1200, h=700):
     max_label = max((len(label_of.get(n["id"], "")) for n in nodes), default=2)
     node_w = min(max(max_label * 13 + 40, 110), 190)
     layer_h = 170
+    # 宽层自动折行（每行最多 10 个，父子尽量同排不拆散，减少交叉）；子行间距 80px
+    max_per_row = 10
+    row_gap = 80
     pos = {}
     for l in levels:
         ids = by_level[l]
-        row_w = len(ids) * node_w
-        x0 = 10 if row_w > w - 20 else (w - row_w) / 2
-        for i, nid in enumerate(ids):
-            pos[nid] = {"x": x0 + node_w / 2 + i * node_w, "y": 60 + l * layer_h}
+        row_count = max(1, -(-len(ids) // max_per_row))  # ceil
+        per_row = -(-len(ids) // row_count)
+        rows = [ids[r * per_row:(r + 1) * per_row] for r in range(row_count)]
+        max_row_w = max((len(r) * node_w for r in rows), default=0)
+        x0 = 10 if max_row_w > w - 20 else (w - max_row_w) / 2
+        for ri, row in enumerate(rows):
+            row_w = len(row) * node_w
+            row_x0 = x0 + (max_row_w - row_w) / 2
+            for i, nid in enumerate(row):
+                pos[nid] = {"x": row_x0 + node_w / 2 + i * node_w,
+                            "y": 60 + l * layer_h + ri * row_gap}
     return pos
 
 

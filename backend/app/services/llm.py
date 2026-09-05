@@ -82,6 +82,13 @@ class OpenAICompatLLM(LLMClient):
         # 用户只填根域名（如 https://aihubmix.com）时自动补全，避免 401/404
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
+        # NVIDIA NIM：模型 id 带组织前缀（deepseek-ai/deepseek-v4-flash-0731），缺前缀会 404
+        if "nvidia" in self.base_url.lower() and "/" not in model:
+            for prefix, org in (("deepseek", "deepseek-ai"), ("qwen", "qwen"),
+                                ("llama", "meta"), ("yi", "01-ai"), ("mistral", "mistralai")):
+                if model.startswith(prefix):
+                    model = f"{org}/{model}"
+                    break
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
@@ -97,21 +104,38 @@ class OpenAICompatLLM(LLMClient):
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         effective_timeout = timeout or self.timeout
-        # 轻量重试：云端限流（429）或 5xx 时退避重试，最多 3 次（间隔 1s/2s/3s）
+        # 轻量重试：云端限流（429）/5xx/网络断连（RemoteProtocolError 等）时退避重试，
+        # 最多 3 次（间隔 1s/2s/3s）——NVIDIA 高峰期断连常见，不重试会直接 502
+        import time
         last_exc: Exception | None = None
         for attempt in range(3):
-            resp = httpx.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=body, timeout=effective_timeout,
-            )
-            if resp.status_code not in (429, 500, 502, 503, 504):
-                resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
-            last_exc = httpx.HTTPStatusError(
-                f"Server error '{resp.status_code}'", request=resp.request, response=resp)
+            try:
+                resp = httpx.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=body, timeout=effective_timeout,
+                )
+                if resp.status_code not in (429, 500, 502, 503, 504):
+                    resp.raise_for_status()
+                    msg = resp.json()["choices"][0]["message"]
+                    content = msg.get("content") or ""
+                    if content:
+                        return content
+                    # 思考模型（content 空、思考链在 reasoning_content）被 max_tokens 截断时视为失败重试
+                    finish = resp.json()["choices"][0].get("finish_reason")
+                    if finish == "length":
+                        last_exc = RuntimeError("模型思考/回答被 max_tokens 截断（content 为空），请调大 max_tokens")
+                    else:
+                        last_exc = RuntimeError("模型返回空 content")
+                else:
+                    last_exc = httpx.HTTPStatusError(
+                        f"Server error '{resp.status_code}'", request=resp.request, response=resp)
+            except (httpx.HTTPStatusError, httpx.TransportError) as e:
+                # 5xx 以外的状态码错误/网络层异常也纳入重试
+                if isinstance(e, httpx.HTTPStatusError) and e.response.status_code not in (429, 500, 502, 503, 504, 529):
+                    raise
+                last_exc = e
             if attempt < 2:
-                import time
                 time.sleep(attempt + 1)
         assert last_exc is not None
         raise last_exc
@@ -183,7 +207,7 @@ def extract_graph(llm: LLMClient, texts: list[str]) -> dict:
     content = llm.chat(
         [{"role": "system", "content": GRAPH_EXTRACT_SYSTEM},
          {"role": "user", "content": prompt}],
-        json_mode=True, max_tokens=4096,
+        json_mode=True, max_tokens=8192,
         timeout=600,  # 思考模型批量抽取慢，放宽读超时
     )
     try:

@@ -1,8 +1,11 @@
-import { defineStore } from 'pinia'
+﻿import { defineStore } from 'pinia'
 import client from '../api/client'
 import type { UserInfo } from '../api/types'
 
 export const useAuthStore = defineStore('auth', {
+  getters: {
+    isAdmin: (state) => state.user?.role === 'admin',
+  },
   state: () => ({
     token: localStorage.getItem('token') || '',
     user: null as UserInfo | null,
@@ -25,3 +28,4 @@ export const useAuthStore = defineStore('auth', {
     },
   },
 })
+

@@ -55,6 +55,19 @@ def _migrate() -> None:
         if "prompt_template" not in cols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE api_keys ADD COLUMN prompt_template TEXT DEFAULT ''"))
+    if insp.has_table("knowledge_bases"):
+        cols = {c["name"] for c in insp.get_columns("knowledge_bases")}
+        if "layout_type" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE knowledge_bases ADD COLUMN layout_type VARCHAR(16) DEFAULT 'auto'"))
+    if insp.has_table("audit_logs"):
+        cols = {c["name"] for c in insp.get_columns("audit_logs")}
+        if "rating" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE audit_logs ADD COLUMN rating VARCHAR(16) DEFAULT ''"))
+        if "note" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE audit_logs ADD COLUMN note TEXT DEFAULT ''"))
 
 
 def get_db():

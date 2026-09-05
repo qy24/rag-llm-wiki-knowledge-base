@@ -28,6 +28,9 @@ class Embedder(ABC):
 class OpenAICompatEmbedder(Embedder):
     def __init__(self, settings: Settings):
         self.base_url = settings.embedding_base_url.rstrip("/")
+        # 容错：用户可能误填带 /embeddings 的完整端点（如 https://ai.gitee.com/v1/embeddings）
+        if self.base_url.endswith("/embeddings"):
+            self.base_url = self.base_url[: -len("/embeddings")]
         # OpenAI 兼容网关一般以 /v1 提供接口；只填根域名时自动补全（与 LLM 客户端一致）
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
@@ -38,15 +41,35 @@ class OpenAICompatEmbedder(Embedder):
         # Qwen3-Embedding 等指令式模型：查询/文档推荐加前后缀
         self._query_prefix = settings.embedding_query_prefix or ""
         self._passage_prefix = settings.embedding_passage_prefix or ""
+        # NVIDIA NIM 嵌入（nv-embed 系）要求 input_type=query/passage 参数，且不支持文本前缀
+        self._nvidia = "nvidia" in self.base_url.lower() or "nv-embed" in self.model.lower()
+        # 模型名自动补全：NVIDIA 的模型 id 带组织前缀（如 nvidia/nv-embed-v1、deepseek-ai/...）
+        if "nvidia" in self.base_url.lower() and "/" not in self.model:
+            candidates = {
+                "nv-embed": "nvidia/nv-embed-v1",
+                "nv-embedcode": "nvidia/nv-embedcode-7b-v1",
+                "embed-qa": "nvidia/nv-embedqa-e5-v5",
+                "nv-embedqa": "nvidia/nv-embedqa-e5-v5",
+            }
+            for key, full in candidates.items():
+                if self.model.startswith(key):
+                    self.model = full
+                    break
 
-    def _request(self, texts: list[str]) -> list[list[float]]:
+    def _payload(self, texts: list[str], input_type: str | None) -> dict:
+        body: dict = {"model": self.model, "input": texts}
+        if self._nvidia:
+            body["input_type"] = input_type or "passage"
+        return body
+
+    def _request(self, texts: list[str], input_type: str | None = None) -> list[list[float]]:
         out: list[list[float]] = []
         for i in range(0, len(texts), self._batch):
             batch = texts[i:i + self._batch]
             resp = httpx.post(
                 f"{self.base_url}/embeddings",
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                json={"model": self.model, "input": batch},
+                json=self._payload(batch, input_type),
                 timeout=600,  # 本地大模型（Ollama）首次加载可能较慢
             )
             resp.raise_for_status()
@@ -59,14 +82,14 @@ class OpenAICompatEmbedder(Embedder):
         return self._request(texts)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        if self._passage_prefix:
+        if not self._nvidia and self._passage_prefix:
             texts = [self._passage_prefix + t for t in texts]
-        return self._request(texts)
+        return self._request(texts, "passage")
 
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
-        if self._query_prefix:
+        if not self._nvidia and self._query_prefix:
             texts = [self._query_prefix + t for t in texts]
-        return self._request(texts)
+        return self._request(texts, "query")
 
 
 class DummyEmbedder(Embedder):
