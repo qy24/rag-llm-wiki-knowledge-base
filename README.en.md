@@ -4,7 +4,7 @@
 [![CI](https://github.com/qy24/local-knowledge-base/actions/workflows/ci.yml/badge.svg)](https://github.com/qy24/local-knowledge-base/actions/workflows/ci.yml)
 🌐 [中文 README](README.md)
 
-> Open-source positioning: this project offers the **overall ideas and an extensible framework** for knowledge base systems. It is **not bound to any business** — how you organize your materials and what answers look like is up to the knowledge and usage you define. This project only provides the machinery.
+> Open-source positioning: this project offers the **overall ideas and an extensible framework** (Retrieval-Augmented Generation / RAG + the LLM Wiki compilation paradigm, self-hosted on FastAPI + Vue3) for knowledge base systems. It is **not bound to any business** — how you organize your materials and what answers look like is up to the knowledge and usage you define. This project only provides the machinery.
 
 ## The problem it solves
 
@@ -23,7 +23,7 @@ Files pile up, and every answer is a one-off that never compounds. This framewor
 |---|---|
 | Document pipeline | PDF / DOCX / MD / TXT / HTML / PPTX / XLSX / images → parse → chunk (keeps page & heading; heading inside the chunk) → embed → (optional) graph extraction |
 | Knowledge graph | LLM entity/relation extraction (**switchable per KB**); G6 canvas for manual curation: edit / merge / verify / position memory / layered auto-layout |
-| Hybrid retrieval | Vector + graph fused, traceable results; graph hits tightened by real relations; exclusion semantics ("all data except X") and enumeration ("all data") parsed by an LLM intent layer |
+| Hybrid retrieval | Vector + knowledge-graph fusion (**GraphRAG-style**), traceable results; graph hits tightened by real relations; exclusion semantics ("all data except X") and enumeration parsed by an LLM intent layer |
 | **Session-level memory** | Pass any `session_id` (customer id / thread id / arbitrary session label): the server restores that session's previous turns and continues seamlessly, isolated by **key + session** — never cross-contaminated; omit it for stateless mode (fully backward compatible) |
 | **Conversation-context understanding** | Feed a whole back-and-forth log (no roles needed) via `context`, or as the message itself: the system identifies each side, finds the **still-unanswered question** and replies coherently without repeating what was confirmed |
 | **Mode-switchable answering** | Switch answer perspective via request fields such as `consult_type` / `is_after_sale` — the exact semantics are defined by *your* knowledge & prompts; the framework makes no business assumptions |
