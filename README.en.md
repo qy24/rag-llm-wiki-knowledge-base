@@ -21,20 +21,22 @@ Files pile up, and every answer is a one-off that never compounds. This framewor
 
 | Capability | Description |
 |---|---|
-| Document pipeline | PDF / DOCX / MD / TXT / HTML / PPTX / XLSX / images → parse → chunk (keeps page & heading; heading inside the chunk) → embed → (optional) graph extraction |
-| Knowledge graph | LLM entity/relation extraction (**switchable per KB**); G6 canvas for manual curation: edit / merge / verify / position memory / layered auto-layout |
-| Hybrid retrieval | Vector + knowledge-graph fusion (**GraphRAG-style**), traceable results; graph hits tightened by real relations; exclusion semantics ("all data except X") and enumeration parsed by an LLM intent layer |
-| **Session-level memory** | Pass any `session_id` (customer id / thread id / arbitrary session label): the server restores that session's previous turns and continues seamlessly, isolated by **key + session** — never cross-contaminated; omit it for stateless mode (fully backward compatible) |
-| **Conversation-context understanding** | Feed a whole back-and-forth log (no roles needed) via `context`, or as the message itself: the system identifies each side, finds the **still-unanswered question** and replies coherently without repeating what was confirmed |
-| **Mode-switchable answering** | Switch answer perspective via request fields such as `consult_type` / `is_after_sale` — the exact semantics are defined by *your* knowledge & prompts; the framework makes no business assumptions |
-| **Structured knowledge compilation** | Materials can be organized into "question → how to handle" entry libraries; raw material can be fed to the AI to be distilled into reusable structured experience; entries + graph + distilled cases form a compounding compiled layer (see below) |
-| **Anti-hallucination** | Generation starts with a self-check that keeps claims apart from facts: ① **facts** — whether attachments/images truly exist is detected by the server and stated to the model, which answers only from what really exists and never "imagines" seeing or receiving anything; ② **rules** — only information actually provided by the input is acknowledged; ③ **decisions** — conclusions that commit the user (payouts, changes, promises) are never made by the model on the user's behalf but escalated for human review. Every answer stays traceable and auditable, so drift can be located and corrected |
-| **Audit-driven evolution** | Every Q&A is logged (question + answer) and can be tagged good / bad with one click: good ones are distilled automatically and referenced as few-shot examples; bad ones are exported as a review checklist |
-| Read-only account | Role-based accounts: a read-only viewer can browse everything and try the console, while every mutation is hidden in the UI **and** rejected with 403 server-side |
-| Multi-tenant keys | Independent keys bound to knowledge scopes, expirable / revocable / hashed, fully audited |
-| Three-level prompts | Answer prompts configurable per key / global / built-in — tone, language and style are yours to define; the framework guarantees "grounded, clean output" |
+| Knowledge graph | LLM entity/relation extraction (**switchable per KB**); G6 canvas for manual curation: edit / merge / verify / layout / position memory |
+| Read-only account | Role-based accounts: a viewer can browse everything; every mutation is hidden in the UI **and** rejected with 403 |
+| Multi-tenant keys | Independent keys bound to scopes, expirable / revocable / hashed, fully audited |
+| Three-level prompts | Per-key / global / built-in; tone, language and style are yours to define |
 | Interfaces | `POST /api/v1/knowledge/search`, `/api/v1/chat/completions` (OpenAI-compatible, vision-capable), **MCP Server** (`POST /mcp`) |
 
+### Key mechanisms
+
+- **Document pipeline** — PDF / DOCX / MD / TXT / HTML / PPTX / XLSX / images → parse → chunk (keeps page & heading; the heading stays inside the chunk) → embed → (optional) graph extraction.
+- **Hybrid retrieval** — vector + knowledge-graph fusion (**GraphRAG-style**), traceable results; graph hits tightened by real relations; exclusion ("all data except X") and enumeration semantics parsed by an LLM intent layer.
+- **Session-level memory** — pass any `session_id` (customer id / thread id / arbitrary session label): the server restores that session's previous turns and continues seamlessly, isolated by **key + session** — never cross-contaminated; omit it for stateless mode (fully backward compatible).
+- **Conversation-context understanding** — feed a whole back-and-forth log (no roles needed) via `context`, or as the message itself: the system identifies each side, finds the **still-unanswered question** and replies coherently without repeating what was already confirmed.
+- **Mode-switchable answering** — switch the answer perspective via request fields such as `consult_type` / `is_after_sale`; the exact semantics are defined by *your* knowledge & prompts — the framework makes no business assumptions.
+- **Structured knowledge compilation** — materials can be organized into "question → how to handle" entry libraries; raw material can be fed to the AI and distilled into reusable structured experience; entries + graph + distilled cases form a compounding compiled layer (see below).
+- **Anti-hallucination** — generation starts with a self-check that keeps claims apart from facts: ① **facts** — whether attachments/images truly exist is detected by the server and stated to the model, which answers only from what really exists and never "imagines" seeing or receiving anything; ② **rules** — only information actually provided by the input is acknowledged; ③ **decisions** — conclusions that commit the user (payouts, changes, promises) are never made by the model on the user's behalf but escalated for human review. Every answer stays traceable and auditable, so drift can be located and corrected.
+- **Audit-driven evolution** — every Q&A is logged and can be tagged good / bad: good ones are distilled automatically and referenced as few-shot examples later; bad ones are exported as a review checklist.
 ## RAG & LLM Wiki: Compiled Knowledge
 
 The 2026 **LLM Wiki** discourse put its finger on RAG's ceiling with a compiler analogy: RAG is like an **interpreter** — it re-retrieves fragments at runtime for every query and forgets them after; LLM Wiki is like a **compiler** — raw sources are first compiled into structured, interlinked pages, and every later query runs against the compiled artifact.
