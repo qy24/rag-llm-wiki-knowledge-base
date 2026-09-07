@@ -1,7 +1,7 @@
 # Local Knowledge Base System
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/qy24/local-knowledge-base/actions/workflows/ci.yml/badge.svg)](https://github.com/qy24/local-knowledge-base/actions/workflows/ci.yml)
+[![CI](https://github.com/qy24/rag-llm-wiki-knowledge-base/actions/workflows/ci.yml/badge.svg)](https://github.com/qy24/rag-llm-wiki-knowledge-base/actions/workflows/ci.yml)
 🌐 [中文 README](README.md)
 
 > Open-source positioning: this project offers the **overall ideas and an extensible framework** (Retrieval-Augmented Generation / RAG + the LLM Wiki compilation paradigm, self-hosted on FastAPI + Vue3) for knowledge base systems. It is **not bound to any business** — how you organize your materials and what answers look like is up to the knowledge and usage you define. This project only provides the machinery.

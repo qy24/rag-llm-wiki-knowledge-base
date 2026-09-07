@@ -1,7 +1,7 @@
 # 本地知识库系统（Local Knowledge Base System）
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/qy24/local-knowledge-base/actions/workflows/ci.yml/badge.svg)](https://github.com/qy24/local-knowledge-base/actions/workflows/ci.yml)
+[![CI](https://github.com/qy24/rag-llm-wiki-knowledge-base/actions/workflows/ci.yml/badge.svg)](https://github.com/qy24/rag-llm-wiki-knowledge-base/actions/workflows/ci.yml)
 🌐 [English README](README.en.md)
 
 > 开源定位：本项目提供知识库系统的**整体思路与可扩展框架**（Retrieval-Augmented Generation / RAG + LLM Wiki 编译范式，FastAPI + Vue3 自托管部署）。它不绑定任何业务——你的资料如何组织、回答长成什么样，取决于你定义的知识与使用方式；本项目只提供机制与骨架。
